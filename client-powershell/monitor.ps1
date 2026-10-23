@@ -22,10 +22,23 @@ while (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
 # --- SELF-LOCATING BASE ---
 $base     = $PSScriptRoot
 $stateDir = Join-Path $base "state"
-$queueDir = Join-Path $stateDir "queue"
 $logFile  = Join-Path $base "monitor_log.txt"
+
+# Everything that holds per-account state is suffixed with this key. Several
+# accounts may run their own agent on the same PC at the same time (same folder),
+# so they must not share a queue, a cursor or a temp copy of History.
+$userKey  = ("$env:USERDOMAIN\$env:USERNAME") -replace '[^A-Za-z0-9]', '_'
+$queueDir = Join-Path $stateDir ("queue_" + $userKey)
+
 foreach ($d in @($stateDir, $queueDir)) {
     if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+}
+# Blocks from the old shared state\queue (before per-account queues) are moved here.
+# Each block carries its own account name, so sending them from any agent is safe.
+$legacyQueue = Join-Path $stateDir "queue"
+if (Test-Path $legacyQueue) {
+    Get-ChildItem -Path $legacyQueue -Filter *.json -ErrorAction SilentlyContinue |
+        Move-Item -Destination $queueDir -Force -ErrorAction SilentlyContinue
 }
 
 function LogError($msg) { Add-Content -Path $logFile -Value "$(Get-Date) ERROR: $msg" }
@@ -162,7 +175,7 @@ function Get-EdgeProfiles {
 # lock held by a running Edge). Returns up to $limit rows ordered by id.
 function Read-EdgeHistory($historyPath, $cursor, $limit) {
     $rows = [System.Collections.Generic.List[object]]::new()
-    $tmp  = Join-Path $stateDir "tmp_hist.db"
+    $tmp  = Join-Path $stateDir ("tmp_hist_" + $userKey + ".db")
     try {
         Copy-Item $historyPath $tmp -Force
         foreach ($ext in @("-wal","-shm")) {
@@ -218,7 +231,6 @@ function Read-EdgeHistory($historyPath, $cursor, $limit) {
 # The file name contains the account, so several children's accounts on one PC
 # (same state\ folder) never share a cursor. Before this fix all accounts used
 # cursor_<profile>.txt, so one account's cursor hid another account's visits.
-$userKey = $user -replace '[^A-Za-z0-9]', '_'
 function Get-CursorFile($profile) { Join-Path $stateDir ("cursor_" + $userKey + "_" + $profile + ".txt") }
 function Get-Cursor($profile) {
     $f = Get-CursorFile $profile

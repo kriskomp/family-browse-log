@@ -48,14 +48,29 @@ folder anywhere — no hard-coded `C:\boot`.
 3. **Windows**: it samples the active (foreground) window when the user is active.
    Set `window_all=1` in `cfg.Setting` to record every open window instead (v1 style).
 4. **Push**: every `push_interval_sec` it sends queued blocks via `POST /ingest`.
-5. **Offline-safe**: each block is written to `state/queue/` first and removed only
+5. **Offline-safe**: each block is written to the account's own queue
+   (`state\queue_<account>\`) first and removed only
    after the server ACKs. If the endpoint is unreachable (e.g. off the home network),
    blocks stay queued and are retried next cycle. The server is idempotent, so a
    retried block never double-counts. A corrupt or empty block is dropped (logged)
    so it cannot block the rest of the queue.
-6. **Per account**: several Windows accounts may share one PC and one `state\` folder.
-   The local cursor is kept per account and profile (`cursor_<account>_<profile>.txt`),
-   so accounts never hide each other's visits.
+6. **Per account — separate files for everything**: several Windows accounts may use
+   one PC and one `state\` folder, and each account's agent keeps its own state:
+
+   | What | File / place | Notes |
+   |---|---|---|
+   | Edge history cursor | `state\cursor_<account>_<profile>.txt` | one per account and Edge profile |
+   | Edge history copy (temp) | `state\tmp_hist_<account>.db` | read copy of that account's `History` |
+   | Queue of blocks | `state\queue_<account>\*.json` | history visits **and** window (program) rows |
+   | Program / window list | no file of its own | sampled in memory by that account's agent and sent in its queue |
+
+   The database separates accounts by the `UserAccount` column (and `Computer`), so
+   the data of one account never mixes with another's. `<account>` is the Windows
+   `DOMAIN\user` name with non-alphanumeric characters replaced by `_`
+   (e.g. `LEGION_vvojc`).
+
+   Blocks left in the old shared `state\queue\` by earlier versions are moved into the
+   account's queue on the first start. Each block carries its own account name.
 
 ## Relationship to v1
 

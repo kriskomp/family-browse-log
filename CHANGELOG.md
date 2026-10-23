@@ -23,6 +23,7 @@ v2 agent (client).
 ### Fixed
 - Local resume cursor is now kept **per Windows account** (`cursor_<account>_<profile>.txt`). Previously all accounts on one PC shared `cursor_<profile>.txt`, so one account's cursor hid another account's visits (e.g. a second child's history was never sent).
 - Corrupt or empty queue blocks are dropped with an `ERROR` log line instead of blocking the whole queue; empty payloads are never queued or posted.
+- Queue and Edge-history temp copy are now per account too (`state\queue_<account>\`, `state\tmp_hist_<account>.db`). Two accounts running their agent at the same time could otherwise send the same window block twice or overwrite each other's History copy. Blocks from the old shared `state\queue\` are moved into the account's queue on start.
 
 ### Added (settings)
 - New `window_all` setting (seeded `0` in `schema.sql`).
