@@ -1,0 +1,26 @@
+# --- secrets / local machine state (never commit) ---
+settings.dat
+.env
+*.env
+!*.env.example
+
+# agent local state
+state/
+*.db
+*.db-wal
+*.db-shm
+monitor_log.txt
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# --- editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

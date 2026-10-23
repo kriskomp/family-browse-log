@@ -1,0 +1,35 @@
+name: release
+
+# Publishes a GitHub release whenever VERSION changes on main
+# (i.e. after each squash-merged PR that bumps the date-based version).
+
+on:
+  push:
+    branches: [ main ]
+    paths: [ "VERSION" ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Create release if tag is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "Release $VERSION already exists, skipping."
+          else
+            gh release create "$VERSION" \
+              --title "$VERSION" \
+              --notes "Automated release for $VERSION. See CHANGELOG.md."
+          fi
