@@ -49,7 +49,8 @@ folder anywhere — no hard-coded `C:\boot`.
    Set `window_all=1` in `cfg.Setting` to record every open window instead (v1 style).
 4. **Push**: every `push_interval_sec` it sends queued blocks via `POST /ingest`.
 5. **Offline-safe**: each block is written to the account's own queue
-   (`state\queue_<account>\`) first and removed only
+   (`state\queue_<account>\`) first (as `*.json.tmp`, then renamed to `*.json`, so a
+   half-written block is never read) and removed only
    after the server ACKs. If the endpoint is unreachable (e.g. off the home network),
    blocks stay queued and are retried next cycle. The server is idempotent, so a
    retried block never double-counts. A corrupt or empty block is dropped (logged)
@@ -63,6 +64,7 @@ folder anywhere — no hard-coded `C:\boot`.
    | Edge history copy (temp) | `state\tmp_hist_<account>.db` | read copy of that account's `History` |
    | Queue of blocks | `state\queue_<account>\*.json` | history visits **and** window (program) rows |
    | Log | `monitor_log_<account>.txt` (next to the script) | one log per account |
+   | Ownership lock | `state\owner_<account>.lock` | held only by the agent in the active console session |
    | Program / window list | no file of its own | sampled in memory by that account's agent and sent in its queue |
 
    The database separates accounts by the `UserAccount` column (and `Computer`), so
@@ -72,9 +74,15 @@ folder anywhere — no hard-coded `C:\boot`.
 
    **The only shared file is `settings.dat`**, read-only configuration with no user data.
 
-7. **One agent per account**: a second agent for the same account in the same logon
-   session exits at once (logged as `INFO`), so two instances never share a queue or cursor.
-   Different accounts are not affected.
+7. **Single recorder per account**: only the agent running in the **active console
+   session** records for its account. Ownership is an exclusive file handle on
+   `state\owner_<account>.lock`. The owner releases it when its session stops being the
+   active console session (fast user switching, logoff). The agent in the other session
+   then takes it over within one `push_interval_sec`. Windows releases the handle when a
+   process ends, so a crash or logoff never leaves the account locked. Two sessions of
+   one account therefore never write the same queue, cursor or log.
+   - Recording happens only in the console session. An RDP session of the same account
+     is not recorded. Other accounts are not affected.
 
    The old shared `state\queue\` folder from earlier versions is no longer read or moved.
    Nothing sends its blocks any more, so check its contents and delete it by hand.

@@ -38,15 +38,42 @@ foreach ($d in @($stateDir, $queueDir)) {
 function LogError($msg) { Add-Content -Path $logFile -Value "$(Get-Date) ERROR: $msg" }
 function LogInfo($msg)  { Add-Content -Path $logFile -Value "$(Get-Date) INFO: $msg" }
 
-# Only ONE agent per Windows account. A second instance (another RDP session,
-# a duplicate logon trigger) would share this account's queue and cursors.
-# "Local\" = per logon session (no admin rights needed). If the mutex cannot be
-# created at all, the agent still runs - the guard is a safety net, not a gate.
-try { $agentMutex = New-Object System.Threading.Mutex($false, ("Local\fbl_agent_" + $userKey)) }
-catch { $agentMutex = $null; LogError "Mutex jednej instancji niedostepny: $($_.Exception.Message)" }
-if ($agentMutex -and -not $agentMutex.WaitOne(0)) {
-    LogInfo "Agent dla konta $userKey juz dziala - ta instancja konczy prace"
-    exit 0
+# =====================================================================
+# SINGLE RECORDER PER ACCOUNT
+# Only the agent running in the ACTIVE CONSOLE session records for this account.
+# Ownership = an exclusive file handle on state\owner_<account>.lock. Windows
+# releases that handle automatically when the process ends, so a crashed or
+# logged-off agent never leaves the account locked. Works across sessions and
+# needs no administrator rights.
+# =====================================================================
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class ConsoleSession {
+    [DllImport("kernel32.dll")] public static extern uint WTSGetActiveConsoleSessionId();
+}
+"@
+
+$lockPath = Join-Path $stateDir ("owner_" + $userKey + ".lock")
+$script:lockStream = $null
+$script:owner      = $false
+
+function Test-ActiveConsoleSession {
+    $active = [ConsoleSession]::WTSGetActiveConsoleSessionId()
+    $mine   = [uint32][System.Diagnostics.Process]::GetCurrentProcess().SessionId
+    return ($active -eq $mine)
+}
+function Try-AcquireOwner {
+    if ($script:lockStream) { return $true }
+    try {
+        $script:lockStream = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate,
+                                                    [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        return $true
+    }
+    catch { $script:lockStream = $null; return $false }   # another live agent holds it
+}
+function Release-Owner {
+    if ($script:lockStream) { $script:lockStream.Dispose(); $script:lockStream = $null }
 }
 
 # --- CONFIG (server URL + token) from settings.dat next to the script ---
@@ -273,8 +300,11 @@ $script:seq = 0
 function Enqueue($payloadObj) {
     if ($null -eq $payloadObj) { return }   # never write an empty block to the queue
     $script:seq++
-    $name = "{0}_{1:000}.json" -f (Get-Date -Format "yyyyMMddHHmmssfff"), $script:seq
-    $payloadObj | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $queueDir $name) -Encoding UTF8
+    $name  = "{0}_{1:000}.json" -f (Get-Date -Format "yyyyMMddHHmmssfff"), $script:seq
+    $final = Join-Path $queueDir $name
+    $tmpf  = $final + ".tmp"          # written first, renamed when complete (atomic)
+    $payloadObj | ConvertTo-Json -Depth 6 | Set-Content -Path $tmpf -Encoding UTF8
+    Move-Item -Path $tmpf -Destination $final -Force
 }
 
 # Try to send everything queued, oldest first. Server is idempotent, so a
@@ -314,6 +344,20 @@ $enabled       = $true
 
 while ($true) {
     try {
+        # 0) only the owner of this account records. Outside the active console
+        #    session (fast user switching, logoff, lock of another user) we release
+        #    the account and idle; the other session's agent takes over.
+        if (-not (Test-ActiveConsoleSession)) {
+            if ($script:owner) { LogInfo "Sesja nieaktywna - oddaje nagrywanie konta $userKey"; $script:owner = $false }
+            Release-Owner
+            Start-Sleep -Seconds ([int]$settings.push_interval_sec)
+            continue
+        }
+        if (-not $script:owner) {
+            if (Try-AcquireOwner) { $script:owner = $true; LogInfo "Przejmuje nagrywanie konta $userKey (sesja aktywna)" }
+            else { Start-Sleep -Seconds ([int]$settings.push_interval_sec); continue }
+        }
+
         # 1) refresh config from server (settings + authoritative resume point)
         try {
             $rc = Get-RemoteConfig

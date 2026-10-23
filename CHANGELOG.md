@@ -25,7 +25,8 @@ v2 agent (client).
 - Corrupt or empty queue blocks are dropped with an `ERROR` log line instead of blocking the whole queue; empty payloads are never queued or posted.
 - Everything that belongs to a Windows account is now per account: queue (`state\queue_<account>\`), Edge-history temp copy (`state\tmp_hist_<account>.db`), log (`monitor_log_<account>.txt`) and cursors. The only shared file is `settings.dat` (read-only). Two accounts running at the same time could previously share one log, and an agent could move another account's blocks into its own queue; both are removed.
 - Edge-history temp copy is removed before each read, so a stale `-wal`/`-shm` from a previous Edge profile is never used.
-- Only one agent per Windows account: a second instance in the same logon session exits at once (logged) instead of sharing the queue and cursors.
+- Single recorder per account: only the agent in the active console session records for its account. Ownership is an exclusive file lock (`state\owner_<account>.lock`), released automatically when the process ends. Fixes two sessions of one account writing the same queue, cursor and window rows at the same time.
+- Queue blocks are written as `*.json.tmp` and renamed to `*.json` when complete, so a half-written block is never read (and never mistaken for a corrupt one and deleted).
 - The old shared `state\queue\` folder is no longer read or moved; it can be deleted by hand after checking its contents.
 
 ### Added (settings)
