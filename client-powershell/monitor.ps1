@@ -282,18 +282,21 @@ while ($true) {
         try {
             $rc = Get-RemoteConfig
             $enabled = [bool]$rc.enabled
-            # settings/last_visit_id can be empty objects (e.g. excluded user) -
-            # an empty object yields $null names, so guard before iterating.
-            if ($rc.settings) {
-                $sNames = @($rc.settings.PSObject.Properties.Name) | Where-Object { $_ }
-                foreach ($k in $sNames) { $settings[$k] = [int]$rc.settings.$k }
-            }
-            # align local cursor to server's last_visit_id (server is source of truth)
-            if ($rc.last_visit_id) {
-                $pNames = @($rc.last_visit_id.PSObject.Properties.Name) | Where-Object { $_ }
-                foreach ($p in $pNames) {
-                    $srv = [int64]$rc.last_visit_id.$p
-                    if ($srv -gt (Get-Cursor $p)) { Set-Cursor $p $srv }
+            # Only process settings/cursors when enabled. An excluded user gets
+            # enabled:false with empty settings/last_visit_id objects, whose
+            # .PSObject.Properties.Name is $null - skipping avoids touching them.
+            if ($enabled) {
+                if ($rc.settings) {
+                    $sNames = @($rc.settings.PSObject.Properties.Name) | Where-Object { $_ }
+                    foreach ($k in $sNames) { $settings[$k] = [int]$rc.settings.$k }
+                }
+                # align local cursor to server's last_visit_id (server is source of truth)
+                if ($rc.last_visit_id) {
+                    $pNames = @($rc.last_visit_id.PSObject.Properties.Name) | Where-Object { $_ }
+                    foreach ($p in $pNames) {
+                        $srv = [int64]$rc.last_visit_id.$p
+                        if ($srv -gt (Get-Cursor $p)) { Set-Cursor $p $srv }
+                    }
                 }
             }
         }
