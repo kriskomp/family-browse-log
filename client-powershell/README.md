@@ -43,8 +43,10 @@ folder anywhere — no hard-coded `C:\boot`.
    Edge profile. If `enabled` is `false` (user excluded on the server) it idles.
 2. **History**: every `history_read_sec` it reads new Edge visits
    (`visit_id > cursor`) in blocks of `block_size` from a copy of the `History`
-   database (so a running Edge doesn't block it).
-3. **Windows**: it samples the active-window title when the user is active.
+   database (so a running Edge doesn't block it). It drains the whole backlog in
+   consecutive blocks on first run, then only the increment.
+3. **Windows**: it samples the active (foreground) window when the user is active.
+   Set `window_all=1` in `cfg.Setting` to record every open window instead (v1 style).
 4. **Push**: every `push_interval_sec` it sends queued blocks via `POST /ingest`.
 5. **Offline-safe**: each block is written to `state/queue/` first and removed only
    after the server ACKs. If the endpoint is unreachable (e.g. off the home network),

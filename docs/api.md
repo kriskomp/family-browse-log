@@ -34,7 +34,8 @@ Called by the agent on start and periodically afterwards.
     "history_read_sec": 120,
     "block_size": 500,
     "max_backfill": 3000,
-    "idle_limit_sec": 300
+    "idle_limit_sec": 300,
+    "window_all": 0
   },
   "last_visit_id": {
     "Default": 259750,
@@ -44,9 +45,20 @@ Called by the agent on start and periodically afterwards.
 ```
 
 - `enabled` — `false` when this user (optionally on this computer) is listed in
-  `cfg.ExcludedUser`. The agent then idles and sends nothing.
+  `cfg.ExcludedUser`. The agent then idles and sends nothing. When `false`, the server
+  also returns empty `settings` and `last_visit_id`.
 - `settings` — resolved with scope precedence **user > computer > global**
-  (from `cfg.Setting`).
+  (from `cfg.Setting`). All values are integers. Keys:
+  - `push_interval_sec` — how often the agent flushes queued blocks.
+  - `window_sample_sec` — how often the active window is sampled.
+  - `history_read_sec` — how often Edge history is read.
+  - `block_size` — max visits per `POST /ingest` block.
+  - `max_backfill` — on first run, how many newest visits to backfill (`0` = all).
+  - `idle_limit_sec` — no window sampling after this many idle seconds.
+  - `window_all` — `0` = record only the active (foreground) window [default],
+    `1` = record every open window (the old v1 behaviour).
+- If the agent cannot reach `GET /config`, it keeps its last known settings (or the
+  built-in defaults) and buffers data offline until the server is reachable again.
 - `last_visit_id` — map `EdgeProfile -> LastVisitId` (from `dbo.IngestState`).
   A profile the server has never seen returns `0` (or is simply absent); the agent
   treats a missing profile as `0`.

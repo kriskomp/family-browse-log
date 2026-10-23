@@ -45,6 +45,22 @@ sudo systemctl enable --now family-browse-log
 The DB login only needs: `SELECT` on `cfg.*`, and `INSERT`/`UPDATE` on
 `dbo.*` + `cfg.Device`. No agent ever holds this password.
 
+## Tuning settings (no code changes)
+
+Agent behaviour is driven by rows in `cfg.Setting`, served by `GET /config`. Change a
+value in the database and agents pick it up on their next config refresh — the
+PowerShell script is never touched. `sql/settings.sql` holds ready-to-run examples:
+
+- `window_all` — `0` = record only the active window [default], `1` = all windows.
+- per-user / per-computer overrides (precedence: `user > computer > global`).
+- excluding an account via `cfg.ExcludedUser` (that user's agent then idles).
+
+```sql
+-- example: read history more often, globally
+UPDATE cfg.Setting SET SettingValue='60'
+ WHERE Scope='global' AND Computer IS NULL AND UserAccount IS NULL AND SettingKey='history_read_sec';
+```
+
 ## Smoke test
 
 ```bash
