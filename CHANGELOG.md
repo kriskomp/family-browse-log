@@ -16,6 +16,9 @@ Follow-up to 2026.10.23.2: per-account separation and single recorder.
 - Queue blocks are written as `*.json.tmp` and renamed to `*.json` when complete, so a half-written block is never read (and never mistaken for a corrupt one and deleted).
 - The old shared `state\queue\` folder is no longer read or moved; it can be deleted by hand after checking its contents.
 
+### Docs
+- Example account name in `docs/api.md`, `server-python/README.md` and `server-python/sql/settings.sql` is now the placeholder `LENOVO\<konto>` (was a test name).
+
 ## 2026.10.23.2
 
 v2 agent (client).
