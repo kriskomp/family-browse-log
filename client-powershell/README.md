@@ -62,6 +62,7 @@ folder anywhere — no hard-coded `C:\boot`.
    | Edge history cursor | `state\cursor_<account>_<profile>.txt` | one per account and Edge profile |
    | Edge history copy (temp) | `state\tmp_hist_<account>.db` | read copy of that account's `History` |
    | Queue of blocks | `state\queue_<account>\*.json` | history visits **and** window (program) rows |
+   | Log | `monitor_log_<account>.txt` (next to the script) | one log per account |
    | Program / window list | no file of its own | sampled in memory by that account's agent and sent in its queue |
 
    The database separates accounts by the `UserAccount` column (and `Computer`), so
@@ -69,8 +70,14 @@ folder anywhere — no hard-coded `C:\boot`.
    `DOMAIN\user` name with non-alphanumeric characters replaced by `_`
    (e.g. `LEGION_vvojc`).
 
-   Blocks left in the old shared `state\queue\` by earlier versions are moved into the
-   account's queue on the first start. Each block carries its own account name.
+   **The only shared file is `settings.dat`**, read-only configuration with no user data.
+
+7. **One agent per account**: a second agent for the same account in the same logon
+   session exits at once (logged as `INFO`), so two instances never share a queue or cursor.
+   Different accounts are not affected.
+
+   The old shared `state\queue\` folder from earlier versions is no longer read or moved.
+   Nothing sends its blocks any more, so check its contents and delete it by hand.
 
 ## Relationship to v1
 

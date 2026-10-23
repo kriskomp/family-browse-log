@@ -22,27 +22,32 @@ while (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
 # --- SELF-LOCATING BASE ---
 $base     = $PSScriptRoot
 $stateDir = Join-Path $base "state"
-$logFile  = Join-Path $base "monitor_log.txt"
 
-# Everything that holds per-account state is suffixed with this key. Several
-# accounts may run their own agent on the same PC at the same time (same folder),
-# so they must not share a queue, a cursor or a temp copy of History.
+# Everything that belongs to one Windows account is suffixed with this key
+# (e.g. LEGION_vvojc). Several accounts may run their agent on the same PC and
+# in the same folder, so each account gets its own log, queue, cursors and
+# temp copy of History. The ONLY shared file is settings.dat (read-only config).
 $userKey  = ("$env:USERDOMAIN\$env:USERNAME") -replace '[^A-Za-z0-9]', '_'
+$logFile  = Join-Path $base ("monitor_log_" + $userKey + ".txt")
 $queueDir = Join-Path $stateDir ("queue_" + $userKey)
 
 foreach ($d in @($stateDir, $queueDir)) {
     if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }
-# Blocks from the old shared state\queue (before per-account queues) are moved here.
-# Each block carries its own account name, so sending them from any agent is safe.
-$legacyQueue = Join-Path $stateDir "queue"
-if (Test-Path $legacyQueue) {
-    Get-ChildItem -Path $legacyQueue -Filter *.json -ErrorAction SilentlyContinue |
-        Move-Item -Destination $queueDir -Force -ErrorAction SilentlyContinue
-}
 
 function LogError($msg) { Add-Content -Path $logFile -Value "$(Get-Date) ERROR: $msg" }
 function LogInfo($msg)  { Add-Content -Path $logFile -Value "$(Get-Date) INFO: $msg" }
+
+# Only ONE agent per Windows account. A second instance (another RDP session,
+# a duplicate logon trigger) would share this account's queue and cursors.
+# "Local\" = per logon session (no admin rights needed). If the mutex cannot be
+# created at all, the agent still runs - the guard is a safety net, not a gate.
+try { $agentMutex = New-Object System.Threading.Mutex($false, ("Local\fbl_agent_" + $userKey)) }
+catch { $agentMutex = $null; LogError "Mutex jednej instancji niedostepny: $($_.Exception.Message)" }
+if ($agentMutex -and -not $agentMutex.WaitOne(0)) {
+    LogInfo "Agent dla konta $userKey juz dziala - ta instancja konczy prace"
+    exit 0
+}
 
 # --- CONFIG (server URL + token) from settings.dat next to the script ---
 $settingsPath = Join-Path $base "settings.dat"
@@ -177,6 +182,11 @@ function Read-EdgeHistory($historyPath, $cursor, $limit) {
     $rows = [System.Collections.Generic.List[object]]::new()
     $tmp  = Join-Path $stateDir ("tmp_hist_" + $userKey + ".db")
     try {
+        # Remove the previous copy (and its -wal/-shm) first: a stale WAL left over
+        # from another Edge profile must never be applied to this profile's copy.
+        foreach ($t in @($tmp, ($tmp + "-wal"), ($tmp + "-shm"))) {
+            Remove-Item $t -Force -ErrorAction SilentlyContinue
+        }
         Copy-Item $historyPath $tmp -Force
         foreach ($ext in @("-wal","-shm")) {
             if (Test-Path ($historyPath + $ext)) { Copy-Item ($historyPath + $ext) ($tmp + $ext) -Force }
@@ -258,7 +268,7 @@ function Post-Ingest($payloadObj) {
                              -ContentType "application/json; charset=utf-8" -Body $bytes -TimeoutSec 30
 }
 
-# --- offline queue: each pending block is a JSON file in state\queue ---
+# --- offline queue: each pending block is a JSON file in state\queue_<account> ---
 $script:seq = 0
 function Enqueue($payloadObj) {
     if ($null -eq $payloadObj) { return }   # never write an empty block to the queue
