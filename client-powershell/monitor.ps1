@@ -282,12 +282,16 @@ while ($true) {
         try {
             $rc = Get-RemoteConfig
             $enabled = [bool]$rc.enabled
+            # settings/last_visit_id can be empty objects (e.g. excluded user) -
+            # an empty object yields $null names, so guard before iterating.
             if ($rc.settings) {
-                foreach ($k in @($rc.settings.PSObject.Properties.Name)) { $settings[$k] = [int]$rc.settings.$k }
+                $sNames = @($rc.settings.PSObject.Properties.Name) | Where-Object { $_ }
+                foreach ($k in $sNames) { $settings[$k] = [int]$rc.settings.$k }
             }
             # align local cursor to server's last_visit_id (server is source of truth)
             if ($rc.last_visit_id) {
-                foreach ($p in @($rc.last_visit_id.PSObject.Properties.Name)) {
+                $pNames = @($rc.last_visit_id.PSObject.Properties.Name) | Where-Object { $_ }
+                foreach ($p in $pNames) {
                     $srv = [int64]$rc.last_visit_id.$p
                     if ($srv -gt (Get-Cursor $p)) { Set-Cursor $p $srv }
                 }
