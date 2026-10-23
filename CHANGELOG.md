@@ -15,6 +15,15 @@ v2 agent (client).
   - Offline-safe queue in `state/queue/`: blocks are removed only after the server ACK; unreachable endpoint → retried next cycle (server idempotency prevents double-counting).
 - `client-powershell/settings.example.dat` — template for the git-ignored `settings.dat`.
 
+### Changed
+- Agent window capture now records only the **active (foreground) window** by default, instead of every open window every cycle — far fewer, more meaningful rows. Controlled by the new `window_all` setting (`0` = active only [default], `1` = all windows, the old v1 behaviour).
+- Agent now **drains backfill in consecutive blocks** until caught up, instead of one `block_size` block per `history_read_sec` cycle, so the initial catch-up finishes quickly.
+- `window_sample_sec` is now honored as its own cadence (gated independently of pushes).
+
+### Added (settings)
+- New `window_all` setting (seeded `0` in `schema.sql`).
+- `server-python/sql/settings.sql` — helper to tune settings from the database (incl. `window_all`, per-user overrides, exclusions) without touching the agent.
+
 ### Notes
 - v1 agent is unaffected and can run in parallel from a different folder during testing.
 

@@ -55,6 +55,7 @@ $settings = @{
     block_size        = 500
     max_backfill      = 3000
     idle_limit_sec    = 300
+    window_all        = 0        # 0 = tylko aktywne okno (zalecane), 1 = wszystkie okna (jak v1)
 }
 
 $edgeUserData = Join-Path $env:LOCALAPPDATA "Microsoft\Edge\User Data"
@@ -79,6 +80,39 @@ public static class IdleTime {
 function Get-IdleSeconds {
     try { return [IdleTime]::GetIdleTime() / 1000 }
     catch { LogError "IdleTime error: $($_.Exception.Message)"; return 0 }
+}
+
+# --- ACTIVE (foreground) WINDOW ---
+Add-Type @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class FgWin {
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint procId);
+}
+"@
+function Get-ActiveWindow {
+    try {
+        $h = [FgWin]::GetForegroundWindow()
+        if ($h -eq [IntPtr]::Zero) { return $null }
+        $len = [FgWin]::GetWindowTextLength($h)
+        $sb  = New-Object System.Text.StringBuilder ($len + 1)
+        [void][FgWin]::GetWindowText($h, $sb, $sb.Capacity)
+        $title = $sb.ToString()
+        if ([string]::IsNullOrEmpty($title)) { return $null }
+        if ($title.Length -gt 2000) { $title = $title.Substring(0,2000) }
+        $procId = [uint32]0
+        [void][FgWin]::GetWindowThreadProcessId($h, [ref]$procId)
+        $proc = (Get-Process -Id $procId -ErrorAction SilentlyContinue).ProcessName
+        return [PSCustomObject]@{
+            ts = [int64][Math]::Floor(([DateTimeOffset](Get-Date)).ToUnixTimeSeconds())
+            session_min = 0; program = $proc; window = $title
+        }
+    }
+    catch { return $null }
 }
 
 # =====================================================================
@@ -239,6 +273,7 @@ function Flush-Queue {
 $windowBuffer  = [System.Collections.Generic.List[object]]::new()
 $lastHistory   = [DateTime]::MinValue
 $lastPush      = [DateTime]::MinValue
+$lastWindow    = [DateTime]::MinValue
 $enabled       = $true
 
 while ($true) {
@@ -269,27 +304,40 @@ while ($true) {
 
         $now = Get-Date
 
-        # 2) window sample (only when user is active)
+        # 2) window sample (only when user is active), every window_sample_sec
         if (((Get-IdleSeconds) -lt [int]$settings.idle_limit_sec) -and
-            (($now - $lastPush).TotalSeconds -ge [int]$settings.window_sample_sec -or $windowBuffer.Count -eq 0)) {
-            Get-Process | Where-Object { $_.MainWindowTitle -ne "" } |
-                Select-Object ProcessName, MainWindowTitle | ForEach-Object {
-                    $w = $_.MainWindowTitle; if ($w.Length -gt 2000) { $w = $w.Substring(0,2000) }
-                    $windowBuffer.Add([PSCustomObject]@{
-                        ts = [int64][Math]::Floor(([DateTimeOffset](Get-Date)).ToUnixTimeSeconds())
-                        session_min = 0; program = $_.ProcessName; window = $w
-                    }) | Out-Null
-                }
+            (($now - $lastWindow).TotalSeconds -ge [int]$settings.window_sample_sec)) {
+            $lastWindow = $now
+            if ([int]$settings.window_all -eq 1) {
+                # wszystkie okna z tytulem (jak v1)
+                Get-Process | Where-Object { $_.MainWindowTitle -ne "" } |
+                    Select-Object ProcessName, MainWindowTitle | ForEach-Object {
+                        $w = $_.MainWindowTitle; if ($w.Length -gt 2000) { $w = $w.Substring(0,2000) }
+                        $windowBuffer.Add([PSCustomObject]@{
+                            ts = [int64][Math]::Floor(([DateTimeOffset](Get-Date)).ToUnixTimeSeconds())
+                            session_min = 0; program = $_.ProcessName; window = $w
+                        }) | Out-Null
+                    }
+            }
+            else {
+                # tylko aktywne okno na pierwszym planie (zalecane)
+                $aw = Get-ActiveWindow
+                if ($aw) { $windowBuffer.Add($aw) | Out-Null }
+            }
         }
 
-        # 3) read new Edge history into queue (every history_read_sec)
+        # 3) read new Edge history into queue (every history_read_sec).
+        #    Drains backfill in consecutive blocks until caught up (block < block_size),
+        #    instead of one block per cycle.
         if (($now - $lastHistory).TotalSeconds -ge [int]$settings.history_read_sec) {
             $lastHistory = $now
             $attachedWindows = $false
+            $bs = [int]$settings.block_size
             foreach ($p in (Get-EdgeProfiles)) {
-                $cursor = Get-Cursor $p.FolderName
-                $visits = Read-EdgeHistory $p.HistoryPath $cursor ([int]$settings.block_size)
-                if ($visits.Count -gt 0) {
+                while ($true) {
+                    $cursor = Get-Cursor $p.FolderName
+                    $visits = Read-EdgeHistory $p.HistoryPath $cursor $bs
+                    if ($visits.Count -eq 0) { break }
                     $wins = @()
                     if (-not $attachedWindows) { $wins = @($windowBuffer); $attachedWindows = $true }
                     Enqueue ([PSCustomObject]@{
@@ -298,6 +346,7 @@ while ($true) {
                     })
                     Set-Cursor $p.FolderName ([int64]($visits[$visits.Count-1].visit_id))
                     LogInfo "Zakolejkowano $($visits.Count) wizyt [$($p.FolderName)]"
+                    if ($visits.Count -lt $bs) { break }   # dogonilismy biezacy stan
                 }
             }
             if ($attachedWindows) { $windowBuffer.Clear() }
