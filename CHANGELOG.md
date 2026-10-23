@@ -3,6 +3,21 @@
 All notable changes to this project are documented here.
 Versions are date-based: `YYYY.MM.DD.N`.
 
+## 2026.10.23.2
+
+v2 agent (client).
+
+### Added
+- `client-powershell/monitor.ps1` — the v2 Windows agent:
+  - Self-locating via `$PSScriptRoot` (no hard-coded `C:\boot`); `state/`, log and `settings.dat` live next to the script.
+  - Talks only to the endpoint (`GET /config`, `POST /ingest`) — holds no database password, only the server URL + API token in `settings.dat`.
+  - Reads new Edge visits in blocks of `block_size` from a copy of the `History` db; samples active-window activity; honors `enabled` (server-side exclusion) and all settings from `GET /config`.
+  - Offline-safe queue in `state/queue/`: blocks are removed only after the server ACK; unreachable endpoint → retried next cycle (server idempotency prevents double-counting).
+- `client-powershell/settings.example.dat` — template for the git-ignored `settings.dat`.
+
+### Notes
+- v1 agent is unaffected and can run in parallel from a different folder during testing.
+
 ## 2026.10.23.1
 
 Initial v2 scaffold — endpoint-based architecture.

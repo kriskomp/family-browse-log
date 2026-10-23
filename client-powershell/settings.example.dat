@@ -1,0 +1,1 @@
+@('http://netguard.local:8080','PASTE_API_TOKEN_HERE')
