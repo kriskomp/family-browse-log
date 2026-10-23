@@ -22,14 +22,59 @@ while (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) {
 # --- SELF-LOCATING BASE ---
 $base     = $PSScriptRoot
 $stateDir = Join-Path $base "state"
-$queueDir = Join-Path $stateDir "queue"
-$logFile  = Join-Path $base "monitor_log.txt"
+
+# Everything that belongs to one Windows account is suffixed with this key
+# (e.g. LEGION_vvojc). Several accounts may run their agent on the same PC and
+# in the same folder, so each account gets its own log, queue, cursors and
+# temp copy of History. The ONLY shared file is settings.dat (read-only config).
+$userKey  = ("$env:USERDOMAIN\$env:USERNAME") -replace '[^A-Za-z0-9]', '_'
+$logFile  = Join-Path $base ("monitor_log_" + $userKey + ".txt")
+$queueDir = Join-Path $stateDir ("queue_" + $userKey)
+
 foreach ($d in @($stateDir, $queueDir)) {
     if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }
 
 function LogError($msg) { Add-Content -Path $logFile -Value "$(Get-Date) ERROR: $msg" }
 function LogInfo($msg)  { Add-Content -Path $logFile -Value "$(Get-Date) INFO: $msg" }
+
+# =====================================================================
+# SINGLE RECORDER PER ACCOUNT
+# Only the agent running in the ACTIVE CONSOLE session records for this account.
+# Ownership = an exclusive file handle on state\owner_<account>.lock. Windows
+# releases that handle automatically when the process ends, so a crashed or
+# logged-off agent never leaves the account locked. Works across sessions and
+# needs no administrator rights.
+# =====================================================================
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class ConsoleSession {
+    [DllImport("kernel32.dll")] public static extern uint WTSGetActiveConsoleSessionId();
+}
+"@
+
+$lockPath = Join-Path $stateDir ("owner_" + $userKey + ".lock")
+$script:lockStream = $null
+$script:owner      = $false
+
+function Test-ActiveConsoleSession {
+    $active = [ConsoleSession]::WTSGetActiveConsoleSessionId()
+    $mine   = [uint32][System.Diagnostics.Process]::GetCurrentProcess().SessionId
+    return ($active -eq $mine)
+}
+function Try-AcquireOwner {
+    if ($script:lockStream) { return $true }
+    try {
+        $script:lockStream = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate,
+                                                    [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        return $true
+    }
+    catch { $script:lockStream = $null; return $false }   # another live agent holds it
+}
+function Release-Owner {
+    if ($script:lockStream) { $script:lockStream.Dispose(); $script:lockStream = $null }
+}
 
 # --- CONFIG (server URL + token) from settings.dat next to the script ---
 $settingsPath = Join-Path $base "settings.dat"
@@ -162,8 +207,13 @@ function Get-EdgeProfiles {
 # lock held by a running Edge). Returns up to $limit rows ordered by id.
 function Read-EdgeHistory($historyPath, $cursor, $limit) {
     $rows = [System.Collections.Generic.List[object]]::new()
-    $tmp  = Join-Path $stateDir "tmp_hist.db"
+    $tmp  = Join-Path $stateDir ("tmp_hist_" + $userKey + ".db")
     try {
+        # Remove the previous copy (and its -wal/-shm) first: a stale WAL left over
+        # from another Edge profile must never be applied to this profile's copy.
+        foreach ($t in @($tmp, ($tmp + "-wal"), ($tmp + "-shm"))) {
+            Remove-Item $t -Force -ErrorAction SilentlyContinue
+        }
         Copy-Item $historyPath $tmp -Force
         foreach ($ext in @("-wal","-shm")) {
             if (Test-Path ($historyPath + $ext)) { Copy-Item ($historyPath + $ext) ($tmp + $ext) -Force }
@@ -214,15 +264,19 @@ function Read-EdgeHistory($historyPath, $cursor, $limit) {
     return $rows
 }
 
-# --- local cursor (max visit_id already queued) per profile ---
+# --- local cursor (max visit_id already queued) per Windows account AND Edge profile ---
+# The file name contains the account, so several children's accounts on one PC
+# (same state\ folder) never share a cursor. Before this fix all accounts used
+# cursor_<profile>.txt, so one account's cursor hid another account's visits.
+function Get-CursorFile($profile) { Join-Path $stateDir ("cursor_" + $userKey + "_" + $profile + ".txt") }
 function Get-Cursor($profile) {
-    $f = Join-Path $stateDir ("cursor_" + $profile + ".txt")
+    $f = Get-CursorFile $profile
     $v = [int64]0
     if (Test-Path $f) { [int64]::TryParse((Get-Content $f -Raw).Trim(), [ref]$v) | Out-Null }
     return $v
 }
 function Set-Cursor($profile, $value) {
-    Set-Content -Path (Join-Path $stateDir ("cursor_" + $profile + ".txt")) -Value $value
+    Set-Content -Path (Get-CursorFile $profile) -Value $value
 }
 
 # =====================================================================
@@ -234,18 +288,23 @@ function Get-RemoteConfig {
 }
 
 function Post-Ingest($payloadObj) {
+    if ($null -eq $payloadObj) { throw "pusty payload (null)" }
     $json  = $payloadObj | ConvertTo-Json -Depth 6 -Compress
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
     return Invoke-RestMethod -Uri "$baseUrl/ingest" -Headers $headers -Method Post `
                              -ContentType "application/json; charset=utf-8" -Body $bytes -TimeoutSec 30
 }
 
-# --- offline queue: each pending block is a JSON file in state\queue ---
+# --- offline queue: each pending block is a JSON file in state\queue_<account> ---
 $script:seq = 0
 function Enqueue($payloadObj) {
+    if ($null -eq $payloadObj) { return }   # never write an empty block to the queue
     $script:seq++
-    $name = "{0}_{1:000}.json" -f (Get-Date -Format "yyyyMMddHHmmssfff"), $script:seq
-    $payloadObj | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $queueDir $name) -Encoding UTF8
+    $name  = "{0}_{1:000}.json" -f (Get-Date -Format "yyyyMMddHHmmssfff"), $script:seq
+    $final = Join-Path $queueDir $name
+    $tmpf  = $final + ".tmp"          # written first, renamed when complete (atomic)
+    $payloadObj | ConvertTo-Json -Depth 6 | Set-Content -Path $tmpf -Encoding UTF8
+    Move-Item -Path $tmpf -Destination $final -Force
 }
 
 # Try to send everything queued, oldest first. Server is idempotent, so a
@@ -253,8 +312,15 @@ function Enqueue($payloadObj) {
 function Flush-Queue {
     $files = Get-ChildItem -Path $queueDir -Filter *.json -ErrorAction SilentlyContinue | Sort-Object Name
     foreach ($f in $files) {
+        # A corrupt/empty block can never be sent. Drop it, so it cannot block the queue.
+        $obj = $null
+        try { $raw = Get-Content $f.FullName -Raw; if ($raw) { $obj = $raw | ConvertFrom-Json } } catch { $obj = $null }
+        if ($null -eq $obj) {
+            Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
+            LogError "Uszkodzony blok $($f.Name) usuniety z kolejki"
+            continue
+        }
         try {
-            $obj = Get-Content $f.FullName -Raw | ConvertFrom-Json
             $ack = Post-Ingest $obj
             Remove-Item $f.FullName -Force
             LogInfo "Wyslano $($f.Name): przyjeto=$($ack.accepted_visits) pominieto=$($ack.skipped_visits) okna=$($ack.accepted_windows)"
@@ -278,6 +344,20 @@ $enabled       = $true
 
 while ($true) {
     try {
+        # 0) only the owner of this account records. Outside the active console
+        #    session (fast user switching, logoff, lock of another user) we release
+        #    the account and idle; the other session's agent takes over.
+        if (-not (Test-ActiveConsoleSession)) {
+            if ($script:owner) { LogInfo "Sesja nieaktywna - oddaje nagrywanie konta $userKey"; $script:owner = $false }
+            Release-Owner
+            Start-Sleep -Seconds ([int]$settings.push_interval_sec)
+            continue
+        }
+        if (-not $script:owner) {
+            if (Try-AcquireOwner) { $script:owner = $true; LogInfo "Przejmuje nagrywanie konta $userKey (sesja aktywna)" }
+            else { Start-Sleep -Seconds ([int]$settings.push_interval_sec); continue }
+        }
+
         # 1) refresh config from server (settings + authoritative resume point)
         try {
             $rc = Get-RemoteConfig
