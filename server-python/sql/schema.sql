@@ -146,7 +146,8 @@ USING (VALUES
     ('history_read_sec',  '120'),
     ('block_size',        '500'),
     ('max_backfill',      '3000'),
-    ('idle_limit_sec',    '300')
+    ('idle_limit_sec',    '300'),
+    ('window_all',        '0')     -- 0 = only the active window (recommended), 1 = all windows (v1 behaviour)
 ) AS s (SettingKey, SettingValue)
     ON  t.Scope = 'global'
     AND t.Computer IS NULL

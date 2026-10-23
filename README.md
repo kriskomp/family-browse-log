@@ -40,14 +40,17 @@ All v2 tables live in a dedicated MS SQL database **`monitor`**, split by schema
 - **`dbo`** — incoming data: `BrowsingHistory`, `WindowActivity`, `IngestState`
 - **`cfg`** — configuration: `Setting`, `ExcludedUser`, `Device`
 
-See [`server-python/sql/schema.sql`](server-python/sql/schema.sql).
+See [`server-python/sql/schema.sql`](server-python/sql/schema.sql) for the schema and
+[`server-python/sql/settings.sql`](server-python/sql/settings.sql) to tune settings
+from the database (no code changes).
 
 ## Status
 
-- **v1** (standalone PowerShell agent writing directly to SQL) is in use and is
-  **not** part of this repo — it stays local and keeps running.
-- **v2** (this repo) is the endpoint-based architecture. The server is built first;
-  the agent in `client-powershell/` is adapted to the new contract separately.
+- **v1** (standalone PowerShell agent writing directly to SQL) was the predecessor —
+  it stays local and is superseded by v2.
+- **v2** (this repo) is the endpoint-based architecture: the `server-python/` service
+  and the `client-powershell/` agent, both live and talking over the contract in
+  [`docs/api.md`](docs/api.md).
 
 ## Versioning
 
