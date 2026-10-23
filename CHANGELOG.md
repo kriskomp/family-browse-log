@@ -20,6 +20,10 @@ v2 agent (client).
 - Agent now **drains backfill in consecutive blocks** until caught up, instead of one `block_size` block per `history_read_sec` cycle, so the initial catch-up finishes quickly.
 - `window_sample_sec` is now honored as its own cadence (gated independently of pushes).
 
+### Fixed
+- Local resume cursor is now kept **per Windows account** (`cursor_<account>_<profile>.txt`). Previously all accounts on one PC shared `cursor_<profile>.txt`, so one account's cursor hid another account's visits (e.g. a second child's history was never sent).
+- Corrupt or empty queue blocks are dropped with an `ERROR` log line instead of blocking the whole queue; empty payloads are never queued or posted.
+
 ### Added (settings)
 - New `window_all` setting (seeded `0` in `schema.sql`).
 - `server-python/sql/settings.sql` — helper to tune settings from the database (incl. `window_all`, per-user overrides, exclusions) without touching the agent.

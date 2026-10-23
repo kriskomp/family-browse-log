@@ -51,7 +51,11 @@ folder anywhere — no hard-coded `C:\boot`.
 5. **Offline-safe**: each block is written to `state/queue/` first and removed only
    after the server ACKs. If the endpoint is unreachable (e.g. off the home network),
    blocks stay queued and are retried next cycle. The server is idempotent, so a
-   retried block never double-counts.
+   retried block never double-counts. A corrupt or empty block is dropped (logged)
+   so it cannot block the rest of the queue.
+6. **Per account**: several Windows accounts may share one PC and one `state\` folder.
+   The local cursor is kept per account and profile (`cursor_<account>_<profile>.txt`),
+   so accounts never hide each other's visits.
 
 ## Relationship to v1
 

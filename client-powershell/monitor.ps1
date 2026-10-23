@@ -214,15 +214,20 @@ function Read-EdgeHistory($historyPath, $cursor, $limit) {
     return $rows
 }
 
-# --- local cursor (max visit_id already queued) per profile ---
+# --- local cursor (max visit_id already queued) per Windows account AND Edge profile ---
+# The file name contains the account, so several children's accounts on one PC
+# (same state\ folder) never share a cursor. Before this fix all accounts used
+# cursor_<profile>.txt, so one account's cursor hid another account's visits.
+$userKey = $user -replace '[^A-Za-z0-9]', '_'
+function Get-CursorFile($profile) { Join-Path $stateDir ("cursor_" + $userKey + "_" + $profile + ".txt") }
 function Get-Cursor($profile) {
-    $f = Join-Path $stateDir ("cursor_" + $profile + ".txt")
+    $f = Get-CursorFile $profile
     $v = [int64]0
     if (Test-Path $f) { [int64]::TryParse((Get-Content $f -Raw).Trim(), [ref]$v) | Out-Null }
     return $v
 }
 function Set-Cursor($profile, $value) {
-    Set-Content -Path (Join-Path $stateDir ("cursor_" + $profile + ".txt")) -Value $value
+    Set-Content -Path (Get-CursorFile $profile) -Value $value
 }
 
 # =====================================================================
@@ -234,6 +239,7 @@ function Get-RemoteConfig {
 }
 
 function Post-Ingest($payloadObj) {
+    if ($null -eq $payloadObj) { throw "pusty payload (null)" }
     $json  = $payloadObj | ConvertTo-Json -Depth 6 -Compress
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
     return Invoke-RestMethod -Uri "$baseUrl/ingest" -Headers $headers -Method Post `
@@ -243,6 +249,7 @@ function Post-Ingest($payloadObj) {
 # --- offline queue: each pending block is a JSON file in state\queue ---
 $script:seq = 0
 function Enqueue($payloadObj) {
+    if ($null -eq $payloadObj) { return }   # never write an empty block to the queue
     $script:seq++
     $name = "{0}_{1:000}.json" -f (Get-Date -Format "yyyyMMddHHmmssfff"), $script:seq
     $payloadObj | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $queueDir $name) -Encoding UTF8
@@ -253,8 +260,15 @@ function Enqueue($payloadObj) {
 function Flush-Queue {
     $files = Get-ChildItem -Path $queueDir -Filter *.json -ErrorAction SilentlyContinue | Sort-Object Name
     foreach ($f in $files) {
+        # A corrupt/empty block can never be sent. Drop it, so it cannot block the queue.
+        $obj = $null
+        try { $raw = Get-Content $f.FullName -Raw; if ($raw) { $obj = $raw | ConvertFrom-Json } } catch { $obj = $null }
+        if ($null -eq $obj) {
+            Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
+            LogError "Uszkodzony blok $($f.Name) usuniety z kolejki"
+            continue
+        }
         try {
-            $obj = Get-Content $f.FullName -Raw | ConvertFrom-Json
             $ack = Post-Ingest $obj
             Remove-Item $f.FullName -Force
             LogInfo "Wyslano $($f.Name): przyjeto=$($ack.accepted_visits) pominieto=$($ack.skipped_visits) okna=$($ack.accepted_windows)"
