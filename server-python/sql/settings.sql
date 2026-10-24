@@ -27,10 +27,10 @@ GO
 -- per-user override (e.g. all windows for one child):
 -- MERGE cfg.Setting AS t
 -- USING (VALUES ('window_all','1')) AS s (SettingKey, SettingValue)
---     ON t.Scope='user' AND t.UserAccount='LENOVO\Dziecko' AND t.SettingKey=s.SettingKey
+--     ON t.Scope='user' AND t.UserAccount='LENOVO\<konto>' AND t.SettingKey=s.SettingKey
 -- WHEN MATCHED THEN UPDATE SET SettingValue=s.SettingValue
 -- WHEN NOT MATCHED THEN INSERT (Scope,Computer,UserAccount,SettingKey,SettingValue)
---     VALUES ('user',NULL,'LENOVO\Dziecko',s.SettingKey,s.SettingValue);
+--     VALUES ('user',NULL,'LENOVO\<konto>',s.SettingKey,s.SettingValue);
 
 -- exclude the parent/test account (agent then gets enabled:false):
 -- INSERT INTO cfg.ExcludedUser (UserAccount, Computer, Reason)

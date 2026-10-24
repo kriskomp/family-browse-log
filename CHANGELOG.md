@@ -3,6 +3,22 @@
 All notable changes to this project are documented here.
 Versions are date-based: `YYYY.MM.DD.N`.
 
+## 2026.10.23.3
+
+Follow-up to 2026.10.23.2: per-account separation and single recorder.
+
+### Fixed
+- Local resume cursor is now kept **per Windows account** (`cursor_<account>_<profile>.txt`). Previously all accounts on one PC shared `cursor_<profile>.txt`, so one account's cursor hid another account's visits (e.g. a second child's history was never sent).
+- Corrupt or empty queue blocks are dropped with an `ERROR` log line instead of blocking the whole queue; empty payloads are never queued or posted.
+- Everything that belongs to a Windows account is now per account: queue (`state\queue_<account>\`), Edge-history temp copy (`state\tmp_hist_<account>.db`), log (`monitor_log_<account>.txt`) and cursors. The only shared file is `settings.dat` (read-only). Two accounts running at the same time could previously share one log, and an agent could move another account's blocks into its own queue; both are removed.
+- Edge-history temp copy is removed before each read, so a stale `-wal`/`-shm` from a previous Edge profile is never used.
+- Single recorder per account: only the agent in the active console session records for its account. Ownership is an exclusive file lock (`state\owner_<account>.lock`), released automatically when the process ends. Fixes two sessions of one account writing the same queue, cursor and window rows at the same time.
+- Queue blocks are written as `*.json.tmp` and renamed to `*.json` when complete, so a half-written block is never read (and never mistaken for a corrupt one and deleted).
+- The old shared `state\queue\` folder is no longer read or moved; it can be deleted by hand after checking its contents.
+
+### Docs
+- Example account name in `docs/api.md`, `server-python/README.md` and `server-python/sql/settings.sql` is now the placeholder `LENOVO\<konto>` (was a test name).
+
 ## 2026.10.23.2
 
 v2 agent (client).

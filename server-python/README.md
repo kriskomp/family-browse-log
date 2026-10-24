@@ -68,14 +68,14 @@ UPDATE cfg.Setting SET SettingValue='60'
 curl -s http://localhost:8080/health
 
 # config (auth)
-curl -s "http://localhost:8080/config?computer=LENOVO&user=LENOVO%5CDziecko" \
+curl -s "http://localhost:8080/config?computer=LENOVO&user=LENOVO%5C<konto>" \
      -H "Authorization: Bearer <token>"
 
 # ingest (auth)
 curl -s -X POST http://localhost:8080/ingest \
      -H "Authorization: Bearer <token>" \
      -H "Content-Type: application/json" \
-     -d '{"computer":"LENOVO","user":"LENOVO\\Dziecko","profile":"Default",
+     -d '{"computer":"LENOVO","user":"LENOVO\\<konto>","profile":"Default",
           "visits":[{"visit_id":1,"url":"https://example.com/","title":"Ex","ts":1760000000}],
           "windows":[]}'
 ```

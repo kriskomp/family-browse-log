@@ -21,7 +21,7 @@ Called by the agent on start and periodically afterwards.
 | Param | Example | Maps to |
 |---|---|---|
 | `computer` | `LENOVO` | `Computer` |
-| `user` | `LENOVO\Dziecko` | `UserAccount` |
+| `user` | `LENOVO\<konto>` | `UserAccount` |
 
 **Response `200`**
 
@@ -77,7 +77,7 @@ any window-activity rows gathered since the last push). One profile per request.
 ```json
 {
   "computer": "LENOVO",
-  "user": "LENOVO\\Dziecko",
+  "user": "LENOVO\\<konto>",
   "profile": "Default",
   "visits": [
     { "visit_id": 259751, "url": "https://example.com/", "title": "Example", "ts": 1760000000 }
