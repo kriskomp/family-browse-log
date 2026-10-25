@@ -41,11 +41,17 @@ def local_iso(naive: datetime, tz: ZoneInfo) -> str:
 
 
 def merge_activity(web_rows: list[dict], window_rows: list[dict],
-                   tz: ZoneInfo, limit: int) -> tuple[list[dict], dict]:
+                   tz: ZoneInfo, limit: int,
+                   latest_web: list[dict] | None = None,
+                   latest_window: list[dict] | None = None) -> tuple[list[dict], dict]:
     """Merge web and window rows into one timeline, newest first.
 
     Rows are dicts with a naive local 'time' key. Sorting uses the naive time, so
     the order stays right across a DST change.
+
+    summary always reports the newest record of EACH kind. latest_web / latest_window
+    carry those records when the kind was not part of the items (e.g. kind=windows),
+    so a missing kind is never confused with "no activity".
     """
     timed: list[tuple[datetime, dict]] = []
     for r in web_rows:
@@ -70,10 +76,12 @@ def merge_activity(web_rows: list[dict], window_rows: list[dict],
     timed.sort(key=lambda pair: pair[0], reverse=True)
     items = [item for _, item in timed[:limit]]
 
+    web_for_summary = web_rows if latest_web is None else latest_web
+    win_for_summary = window_rows if latest_window is None else latest_window
     summary = {
-        "last_web_at": (local_iso(max(r["time"] for r in web_rows), tz)
-                        if web_rows else None),
-        "last_window_at": (local_iso(max(r["time"] for r in window_rows), tz)
-                           if window_rows else None),
+        "last_web_at": (local_iso(max(r["time"] for r in web_for_summary), tz)
+                        if web_for_summary else None),
+        "last_window_at": (local_iso(max(r["time"] for r in win_for_summary), tz)
+                           if win_for_summary else None),
     }
     return items, summary

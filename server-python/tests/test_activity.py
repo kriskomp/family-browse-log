@@ -130,5 +130,26 @@ class DstBoundary(unittest.TestCase):
         self.assertEqual(items[1]["time"], "2026-10-25T02:30:00+02:00")
 
 
+class SummaryIndependentOfKind(unittest.TestCase):
+    def test_kind_windows_still_reports_last_web(self):
+        latest_web = [{"time": datetime(2026, 10, 20, 9, 0), "url": "https://a.pl/", "title": "t",
+                       "visits": 1, "user": "u", "computer": "c"}]
+        win = [{"time": datetime(2026, 10, 20, 10, 0), "program": "p", "window": "w",
+                "user": "u", "computer": "c"}]
+        items, summary = merge_activity([], win, TZ, 5, latest_web=latest_web)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["type"], "window")
+        self.assertEqual(summary["last_web_at"], "2026-10-20T09:00:00+02:00")
+        self.assertEqual(summary["last_window_at"], "2026-10-20T10:00:00+02:00")
+
+    def test_kind_web_still_reports_last_window(self):
+        web = [{"time": datetime(2026, 10, 20, 9, 0), "url": "https://a.pl/", "title": "t",
+                "visits": 1, "user": "u", "computer": "c"}]
+        latest_win = [{"time": datetime(2026, 10, 20, 11, 0), "program": "p", "window": "w",
+                       "user": "u", "computer": "c"}]
+        items, summary = merge_activity(web, [], TZ, 5, latest_window=latest_win)
+        self.assertEqual([i["type"] for i in items], ["web"])
+        self.assertEqual(summary["last_window_at"], "2026-10-20T11:00:00+02:00")
+
 if __name__ == "__main__":
     unittest.main()

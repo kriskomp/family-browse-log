@@ -202,7 +202,8 @@ Response:
   Query strings often hold login codes and session tokens.
 - `time` is local time with its offset (the database stores local time; the offset
   is +01:00 in winter and +02:00 in summer).
-- `summary` always holds the newest record of each kind, even when `limit` cuts the list.
+- `summary` always holds the newest record of each kind, even when `limit` cuts the list
+  or `kind` leaves one kind out. `null` means that kind has no data at all.
 - A `limit` above the maximum is capped, and the response reports the value applied.
 - `limit < 1` returns `422`.
 

@@ -12,6 +12,9 @@ Read API for Home Assistant (server side).
 - `GET /users` — accounts that have data, with `last_seen` and `excluded`, for the Home Assistant account picker.
 - Separate reader token `FBL_READER_TOKEN`. It cannot write or read agent config; the agent token cannot read the activity API.
 
+### Fixed
+- `summary` on `GET /activity` reports the newest record of each kind even when `kind` leaves one kind out (previously it showed `null` for the omitted kind).
+
 ### Changed
 - Agent token is `FBL_AGENT_TOKEN`. `FBL_API_TOKEN` is still accepted as an alias, so existing agents keep working.
 - Read API returns local time with its offset and never includes URL query strings or fragments.

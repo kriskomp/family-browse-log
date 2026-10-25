@@ -144,8 +144,11 @@ def get_activity(
                if kind in ("web", "both") else [])
         win = (db.fetch_window_activity(cur, user, computer, n)
                if kind in ("windows", "both") else [])
+        # summary = newest record of each kind, even when that kind is not in items
+        latest_web = web if kind in ("web", "both") else db.fetch_web_activity(cur, user, computer, 1)
+        latest_win = win if kind in ("windows", "both") else db.fetch_window_activity(cur, user, computer, 1)
 
-    items, summary = merge_activity(web, win, tz, n)
+    items, summary = merge_activity(web, win, tz, n, latest_web, latest_win)
     return ActivityResponse(
         generated_at=datetime.now(tz).isoformat(timespec="seconds"),
         kind=kind,
