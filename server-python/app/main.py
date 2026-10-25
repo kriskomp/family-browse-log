@@ -1,32 +1,49 @@
-"""family-browse-log ingest service (FastAPI).
+"""family-browse-log server (FastAPI).
 
 Endpoints (see ../docs/api.md):
-    GET  /config   - per-agent settings + resume state
-    POST /ingest   - receive a block of visits + window activity
-    GET  /health   - liveness/DB check (no auth)
+    GET  /config    - agent: per-agent settings + resume state        (agent token)
+    POST /ingest    - agent: receive a block of visits + windows       (agent token)
+    GET  /users     - reader: accounts with data, for the HA picker    (reader token)
+    GET  /activity  - reader: newest web + window activity             (reader token)
+    GET  /health    - liveness/DB check (no auth)
 """
 from __future__ import annotations
 
 import secrets
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from . import db
+from .activity import KINDS, clamp_limit, local_iso, merge_activity
 from .config import get_settings
 from .ingest import process_ingest
-from .models import ConfigResponse, IngestRequest, IngestResponse
+from .models import (ActivityResponse, ConfigResponse, IngestRequest,
+                     IngestResponse, UsersResponse)
 
-app = FastAPI(title="family-browse-log", version="2026.10.23.1")
+app = FastAPI(title="family-browse-log", version="2026.10.25.4")
 
 _bearer = HTTPBearer(auto_error=False)
 
 
-def require_token(cred: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
-    expected = get_settings().api_token
-    if not expected or cred is None or cred.scheme.lower() != "bearer" \
-            or not secrets.compare_digest(cred.credentials, expected):
+def _check_token(cred: HTTPAuthorizationCredentials | None, expected: str) -> None:
+    # compare bytes: compare_digest on non-ASCII str raises TypeError (HTTP 500)
+    if (not expected or cred is None or cred.scheme.lower() != "bearer"
+            or not secrets.compare_digest(cred.credentials.encode("utf-8"),
+                                          expected.encode("utf-8"))):
         raise HTTPException(status_code=401, detail="invalid or missing token")
+
+
+def require_agent(cred: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
+    """Write-side token: only the PC agents hold it."""
+    _check_token(cred, get_settings().agent_token)
+
+
+def require_reader(cred: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
+    """Read-side token: Home Assistant holds it. It cannot ingest or read config."""
+    _check_token(cred, get_settings().reader_token)
 
 
 @app.get("/health")
@@ -52,7 +69,7 @@ def health() -> dict:
 def get_config(
     computer: str = Query(...),
     user: str = Query(...),
-    _=Depends(require_token),
+    _=Depends(require_agent),
 ) -> ConfigResponse:
     with db.connect() as conn:
         cur = conn.cursor()
@@ -64,7 +81,7 @@ def get_config(
 
 
 @app.post("/ingest", response_model=IngestResponse)
-def post_ingest(req: IngestRequest, _=Depends(require_token)) -> IngestResponse:
+def post_ingest(req: IngestRequest, _=Depends(require_agent)) -> IngestResponse:
     with db.connect() as conn:
         cur = conn.cursor()
         # excluded users: accept but write nothing, return their current resume point
@@ -74,3 +91,65 @@ def post_ingest(req: IngestRequest, _=Depends(require_token)) -> IngestResponse:
                                   accepted_visits=0, skipped_visits=len(req.visits),
                                   accepted_windows=0)
         return process_ingest(conn, req)
+
+
+@app.get("/users", response_model=UsersResponse)
+def get_users(_=Depends(require_reader)) -> UsersResponse:
+    """Accounts that have data, so the HA config flow can offer them as a list."""
+    tz = ZoneInfo(get_settings().local_tz)
+    with db.connect() as conn:
+        cur = conn.cursor()
+        rows = db.list_users(cur)
+        excluded = db.excluded_accounts(cur)
+
+    def is_excluded(user: str, computer: str) -> bool:
+        return any(u == user and (c is None or c == computer) for u, c in excluded)
+
+    users = [
+        {"computer": comp, "user": user,
+         "last_seen": local_iso(last, tz) if last else None,
+         "excluded": is_excluded(user, comp)}
+        for comp, user, last in rows
+    ]
+    return UsersResponse(users=users)
+
+
+@app.get("/activity", response_model=ActivityResponse)
+def get_activity(
+    kind: str = Query("both", pattern="^(web|windows|both)$"),
+    user: list[str] = Query(default=[]),
+    computer: str | None = Query(default=None),
+    limit: int | None = Query(default=None, ge=1),
+    _=Depends(require_reader),
+) -> ActivityResponse:
+    """Newest activity, merged into one timeline (newest first).
+
+    - kind: web | windows | both (default both)
+    - user: repeat the parameter to pick several accounts (default: all)
+    - computer: optional single PC
+    - limit: items to return; default FBL_ACTIVITY_DEFAULT_LIMIT, capped at FBL_ACTIVITY_MAX_LIMIT
+    """
+    if kind not in KINDS:  # pattern already enforces this; kept as a guard
+        raise HTTPException(status_code=422, detail="kind must be web, windows or both")
+    s = get_settings()
+    tz = ZoneInfo(s.local_tz)
+    try:
+        n = clamp_limit(limit, s.activity_default_limit, s.activity_max_limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        web = (db.fetch_web_activity(cur, user, computer, n)
+               if kind in ("web", "both") else [])
+        win = (db.fetch_window_activity(cur, user, computer, n)
+               if kind in ("windows", "both") else [])
+
+    items, summary = merge_activity(web, win, tz, n)
+    return ActivityResponse(
+        generated_at=datetime.now(tz).isoformat(timespec="seconds"),
+        kind=kind,
+        limit=n,
+        items=items,
+        summary=summary,
+    )

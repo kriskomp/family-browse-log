@@ -104,3 +104,80 @@ def get_last_visit_id_for_profile(cur, computer: str, user: str, profile: str) -
     )
     row = cur.fetchone()
     return int(row[0]) if row else 0
+
+
+# ---------------------------------------------------------------- read API
+
+def _filters(user_col: str, computer_col: str, users: list[str], computer: str | None):
+    """WHERE clause built only from fixed column names and %s placeholders;
+    user-supplied values travel as parameters, never inside the SQL text."""
+    clauses: list[str] = []
+    params: list = []
+    if users:
+        clauses.append(f"{user_col} IN ({', '.join(['%s'] * len(users))})")
+        params.extend(users)
+    if computer:
+        clauses.append(f"{computer_col} = %s")
+        params.append(computer)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
+def list_users(cur) -> list[tuple]:
+    """(Computer, UserAccount, LastSeen) for every account that has any data."""
+    cur.execute(
+        """
+        SELECT x.Computer, x.UserAccount, MAX(x.Seen)
+        FROM (
+            SELECT Computer, UserAccount, MAX(LastVisit) AS Seen
+              FROM dbo.BrowsingHistory GROUP BY Computer, UserAccount
+            UNION ALL
+            SELECT Computer, UserAccount, MAX(EventTime) AS Seen
+              FROM dbo.WindowActivity GROUP BY Computer, UserAccount
+        ) x
+        GROUP BY x.Computer, x.UserAccount
+        ORDER BY x.Computer, x.UserAccount
+        """
+    )
+    return cur.fetchall()
+
+
+def excluded_accounts(cur) -> list[tuple]:
+    """(UserAccount, Computer or None) pairs from cfg.ExcludedUser."""
+    cur.execute("SELECT UserAccount, Computer FROM cfg.ExcludedUser")
+    return cur.fetchall()
+
+
+def fetch_web_activity(cur, users: list[str], computer: str | None, limit: int) -> list[dict]:
+    """Newest web rows (aggregated per day and URL), newest first."""
+    where, params = _filters("UserAccount", "Computer", users, computer)
+    cur.execute(
+        f"""
+        SELECT TOP ({int(limit)}) Computer, UserAccount, Url, Title, LastVisit, VisitCount
+          FROM dbo.BrowsingHistory {where}
+         ORDER BY LastVisit DESC
+        """,
+        params,
+    )
+    return [
+        {"computer": r[0], "user": r[1], "url": r[2], "title": r[3],
+         "time": r[4], "visits": r[5]}
+        for r in cur.fetchall()
+    ]
+
+
+def fetch_window_activity(cur, users: list[str], computer: str | None, limit: int) -> list[dict]:
+    """Newest window samples, newest first."""
+    where, params = _filters("UserAccount", "Computer", users, computer)
+    cur.execute(
+        f"""
+        SELECT TOP ({int(limit)}) Computer, UserAccount, EventTime, Program, WindowTitle
+          FROM dbo.WindowActivity {where}
+         ORDER BY EventTime DESC
+        """,
+        params,
+    )
+    return [
+        {"computer": r[0], "user": r[1], "time": r[2], "program": r[3], "window": r[4]}
+        for r in cur.fetchall()
+    ]

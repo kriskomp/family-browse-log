@@ -141,3 +141,69 @@ For a single `/ingest` call, inside one DB transaction:
 3. Insert `windows` rows into `dbo.WindowActivity`.
 4. Advance `dbo.IngestState.LastVisitId` to the max seen (if greater).
 5. Update `cfg.Device.LastSeen` (heartbeat) for this computer.
+
+---
+
+## Read API (Home Assistant)
+
+Read-only endpoints for Home Assistant. They use a **separate reader token**
+(`FBL_READER_TOKEN`), which cannot write or read agent configuration, and the agent
+token cannot read these endpoints. Both return `401` for a wrong or missing token.
+
+### `GET /users`
+
+Accounts that have any data. Home Assistant uses it to fill the account picker
+after the user enters the server address and reader token.
+
+```json
+{
+  "users": [
+    {"computer": "LEGION", "user": "LEGION\\vvojc", "last_seen": "2026-10-25T18:03:00+01:00", "excluded": false}
+  ]
+}
+```
+
+- `last_seen` — newest record of that account (web or window), local time with offset.
+- `excluded` — `true` when the account is listed in `cfg.ExcludedUser` (it is still
+  shown, so the picker is complete).
+
+### `GET /activity`
+
+Newest activity, merged into one timeline, newest first.
+
+| Param | Default | Meaning |
+|---|---|---|
+| `kind` | `both` | `web`, `windows` or `both` |
+| `user` | all | repeat the parameter to pick several accounts: `user=LEGION%5Cvvojc&user=LEGION%5Cstani` |
+| `computer` | all | a single PC |
+| `limit` | `FBL_ACTIVITY_DEFAULT_LIMIT` (20) | items to return; capped at `FBL_ACTIVITY_MAX_LIMIT` (200) |
+
+Response:
+
+```json
+{
+  "generated_at": "2026-10-25T18:03:12+01:00",
+  "kind": "both",
+  "limit": 5,
+  "items": [
+    {"type": "window", "time": "2026-10-25T18:02:40+01:00", "user": "LEGION\\vvojc",
+     "computer": "LEGION", "program": "msedge", "window": "Blokada reklam - Edge"},
+    {"type": "web", "time": "2026-10-25T18:01:05+01:00", "user": "LEGION\\vvojc",
+     "computer": "LEGION", "url": "https://github.com/kriskomp", "title": "kriskomp", "visits": 2}
+  ],
+  "summary": {
+    "last_web_at": "2026-10-25T18:01:05+01:00",
+    "last_window_at": "2026-10-25T18:02:40+01:00"
+  }
+}
+```
+
+- **URLs never include the query string or fragment** (`scheme://host/path` only).
+  Query strings often hold login codes and session tokens.
+- `time` is local time with its offset (the database stores local time; the offset
+  is +01:00 in winter and +02:00 in summer).
+- `summary` always holds the newest record of each kind, even when `limit` cuts the list.
+- A `limit` above the maximum is capped, and the response reports the value applied.
+- `limit < 1` returns `422`.
+
+**Errors**: `401` invalid/missing reader token · `422` bad parameters.

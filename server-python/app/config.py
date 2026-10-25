@@ -24,8 +24,16 @@ class Settings:
         self.db_user: str = os.getenv("FBL_DB_USER", "")
         self.db_password: str = os.getenv("FBL_DB_PASSWORD", "")
 
-        # --- API auth: the token agents must present ---
-        self.api_token: str = os.getenv("FBL_API_TOKEN", "")
+        # --- API tokens: two roles, never interchangeable ---
+        # agent  : write  - POST /ingest, GET /config (PCs of the children)
+        # reader : read   - GET /users, GET /activity (Home Assistant)
+        # FBL_API_TOKEN is still accepted as the agent token (backward compatible).
+        self.agent_token: str = os.getenv("FBL_AGENT_TOKEN") or os.getenv("FBL_API_TOKEN", "")
+        self.reader_token: str = os.getenv("FBL_READER_TOKEN", "")
+
+        # --- read API limits (items per /activity call) ---
+        self.activity_default_limit: int = int(os.getenv("FBL_ACTIVITY_DEFAULT_LIMIT", "20"))
+        self.activity_max_limit: int = int(os.getenv("FBL_ACTIVITY_MAX_LIMIT", "200"))
 
         # --- timezone used to derive the calendar Day from epoch timestamps ---
         self.local_tz: str = os.getenv("FBL_LOCAL_TZ", "Europe/Warsaw")
@@ -36,8 +44,14 @@ class Settings:
             problems.append("FBL_DB_USER is not set")
         if not self.db_password:
             problems.append("FBL_DB_PASSWORD is not set")
-        if not self.api_token:
-            problems.append("FBL_API_TOKEN is not set")
+        if not self.agent_token:
+            problems.append("FBL_AGENT_TOKEN (or FBL_API_TOKEN) is not set")
+        if not self.reader_token:
+            problems.append("FBL_READER_TOKEN is not set (read API disabled)")
+        elif self.reader_token == self.agent_token:
+            problems.append("FBL_READER_TOKEN must differ from the agent token")
+        if self.activity_default_limit < 1 or self.activity_max_limit < self.activity_default_limit:
+            problems.append("FBL_ACTIVITY_* limits are inconsistent")
         return problems
 
 
