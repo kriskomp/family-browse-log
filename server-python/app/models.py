@@ -42,3 +42,29 @@ class IngestResponse(BaseModel):
     accepted_visits: int
     skipped_visits: int
     accepted_windows: int
+
+
+# ---------- read API responses (GET /users, GET /activity) ----------
+
+class UserEntry(BaseModel):
+    computer: str
+    user: str
+    last_seen: str | None
+    excluded: bool
+
+
+class UsersResponse(BaseModel):
+    users: list[UserEntry]
+
+
+class ActivitySummary(BaseModel):
+    last_web_at: str | None
+    last_window_at: str | None
+
+
+class ActivityResponse(BaseModel):
+    generated_at: str
+    kind: str
+    limit: int
+    items: list[dict]
+    summary: ActivitySummary

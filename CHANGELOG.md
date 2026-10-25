@@ -3,6 +3,26 @@
 All notable changes to this project are documented here.
 Versions are date-based: `YYYY.MM.DD.N`.
 
+## 2026.10.25.4
+
+Read API for Home Assistant (server side).
+
+### Added
+- `GET /activity` — newest web and window activity merged into one timeline, with `kind` (`web`/`windows`/`both`), `user` (repeatable), `computer`, `limit` (default `FBL_ACTIVITY_DEFAULT_LIMIT`, capped at `FBL_ACTIVITY_MAX_LIMIT`), and a `summary` with the newest record of each kind.
+- `GET /users` — accounts that have data, with `last_seen` and `excluded`, for the Home Assistant account picker.
+- Separate reader token `FBL_READER_TOKEN`. It cannot write or read agent config; the agent token cannot read the activity API.
+
+### Fixed
+- `summary` on `GET /activity` reports the newest record of each kind even when `kind` leaves one kind out (previously it showed `null` for the omitted kind).
+
+### Changed
+- Agent token is `FBL_AGENT_TOKEN`. `FBL_API_TOKEN` is still accepted as an alias, so existing agents keep working.
+- Read API returns local time with its offset and never includes URL query strings or fragments.
+- Token comparison works on bytes, so a non-ASCII token returns `401` instead of `500`.
+
+### Notes
+- The DB login needs `SELECT` on `dbo.BrowsingHistory`, `dbo.WindowActivity` and `cfg.ExcludedUser` (see `server-python/README.md`).
+
 ## 2026.10.23.3
 
 Follow-up to 2026.10.23.2: per-account separation and single recorder.
