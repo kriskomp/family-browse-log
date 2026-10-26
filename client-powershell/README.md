@@ -45,12 +45,17 @@ folder anywhere — no hard-coded `C:\boot`.
    (`visit_id > cursor`) in blocks of `block_size` from a copy of the `History`
    database (so a running Edge doesn't block it). It drains the whole backlog in
    consecutive blocks on first run, then only the increment.
-3. **Windows**: it samples the active (foreground) window when the user is active.
+3. **Windows**: it samples the active (foreground) window when the user is active
+   (one sample per `window_sample_sec`, each with its own time). The agent only sends
+   samples; the **server** keeps one row per window per session (one row per browser per
+   session, whatever the tab), with from/to time and total time in front (see `docs/api.md`, *Window grouping*). `session_min` in the
+   payload is ignored.
    Set `window_all=1` in `cfg.Setting` to record every open window instead (v1 style).
 4. **Push**: every `push_interval_sec` it sends queued blocks via `POST /ingest`.
 5. **Offline-safe**: each block is written to the account's own queue
    (`state\queue_<account>\`) first (as `*.json.tmp`, then renamed to `*.json`, so a
-   half-written block is never read) and removed only
+   half-written block is never read; the name is a UTC timestamp, so blocks are always
+   sent oldest first, even when the clock is turned back at the end of DST) and removed only
    after the server ACKs. If the endpoint is unreachable (e.g. off the home network),
    blocks stay queued and are retried next cycle. The server is idempotent, so a
    retried block never double-counts. A corrupt or empty block is dropped (logged)

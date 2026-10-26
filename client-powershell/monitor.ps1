@@ -300,7 +300,9 @@ $script:seq = 0
 function Enqueue($payloadObj) {
     if ($null -eq $payloadObj) { return }   # never write an empty block to the queue
     $script:seq++
-    $name  = "{0}_{1:000}.json" -f (Get-Date -Format "yyyyMMddHHmmssfff"), $script:seq
+    # UTC, so the name order never goes backwards when the local clock is turned back
+    # (end of DST) - blocks must reach the server oldest first (window sessions rely on it)
+    $name  = "{0}_{1:000}.json" -f ((Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmssfff")), $script:seq
     $final = Join-Path $queueDir $name
     $tmpf  = $final + ".tmp"          # written first, renamed when complete (atomic)
     $payloadObj | ConvertTo-Json -Depth 6 | Set-Content -Path $tmpf -Encoding UTF8

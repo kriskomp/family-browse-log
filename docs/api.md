@@ -97,8 +97,8 @@ any window-activity rows gathered since the last push). One profile per request.
 | `visits[].url` | `BrowsingHistory.Url` | truncated to 2048 |
 | `visits[].title` | `BrowsingHistory.Title` | truncated to 1024 |
 | `visits[].ts` | → `Day`, `FirstVisit`, `LastVisit` | epoch seconds UTC |
-| `windows[].ts` | `WindowActivity.EventTime` | epoch seconds UTC |
-| `windows[].session_min` | `WindowActivity.SessionMinutes` | |
+| `windows[].ts` | `WindowActivity.EventTime` / `EndTime` | epoch seconds UTC; samples are grouped per window and session, see *Window grouping* |
+| `windows[].session_min` | — | ignored since 2026.10.26.5; the server computes `SessionMinutes` itself. The agent may send `0`. |
 | `windows[].program` | `WindowActivity.Program` | |
 | `windows[].window` | `WindowActivity.WindowTitle` | truncated to 2048 |
 
@@ -138,9 +138,76 @@ For a single `/ingest` call, inside one DB transaction:
 1. Drop incoming visits with `visit_id <= LastVisitId`.
 2. Aggregate the rest by `(Day, Url)`: `VisitCount`, earliest `FirstVisit`,
    latest `LastVisit` (and its `Title`). Upsert into `dbo.BrowsingHistory`.
-3. Insert `windows` rows into `dbo.WindowActivity`.
+3. Fold `windows` samples into `dbo.WindowActivity`, one row per window per session
+   (see *Window grouping* below).
 4. Advance `dbo.IngestState.LastVisitId` to the max seen (if greater).
 5. Update `cfg.Device.LastSeen` (heartbeat) for this computer.
+
+### Window grouping
+
+The agent sends one sample every `window_sample_sec` (30 s), each with its own time
+(also when it waited in the offline queue). The server keeps **one row per window per
+session** of the account. A window is:
+
+- **a browser** (`FBL_WINDOW_GROUP_BY_PROGRAM`, default `msedge,chrome,firefox,brave,opera`,
+  case-insensitive): the **program alone**. Its title changes with every tab, new page or
+  tab count ("… i jeszcze 4 strony"), so it would split constantly; the row keeps the
+  **latest** title. Which pages were visited is in `dbo.BrowsingHistory`.
+- **any other program**: `Program` + `WindowTitle` (so different games, documents or
+  Store apps hosted by one process, e.g. `ApplicationFrameHost`, stay apart).
+
+| Column | Meaning |
+|---|---|
+| `SessionStart` | first sample of the session; all rows of one session share it |
+| `EventTime` | first time the window was in front in that session (**from**) |
+| `EndTime` | last time it was in front (**to**) |
+| `WindowTitle` | for browsers the latest title, otherwise the window title |
+| `ActiveSeconds` | total time in front: `window_sample_sec` per sample |
+| `SessionMinutes` | `ActiveSeconds / 60` — grows while the window is used |
+
+- **Switching windows or browser tabs never adds duplicate rows**: coming back to a window in the same
+  session updates its row (`EndTime`, `ActiveSeconds`). Two windows used alternately for
+  10 minutes get about 5 minutes each, while both show `from`/`to` spanning the 10 minutes.
+- **A session ends** when the account sends no sample of any window for longer than
+  `idle_limit_sec + 2 * window_sample_sec` (default 360 s): PC off, asleep, logged off.
+  Reading or watching without touching mouse/keyboard (the agent pauses sampling after
+  `idle_limit_sec`) does not split the session; the paused time is not counted.
+- **Gaps are measured between sample times, not arrival times.** A connection outage,
+  a server restart or a backlog sent later never starts a new session.
+- **Re-sent blocks** (ACK lost): samples not newer than the account's newest `EndTime` are
+  skipped and not counted in `accepted_windows`. This relies on the agent sending its queue
+  oldest first, which it does (queue file names are UTC timestamps, so even turning the clock
+  back at the end of DST cannot reorder them).
+- Samples of one request are processed oldest first, in the same transaction as the rest
+  of `/ingest`.
+
+Data written before 2026.10.26.5 (no `SessionStart`) is merged once by
+`server-python/sql/migrate_2026.10.26.5.sql`.
+
+---|---|
+| `EventTime` | first sample of the group (**from**) |
+| `EndTime` | last sample of the group (**to**) |
+| `SessionMinutes` | whole minutes between them, `floor((EndTime - EventTime) / 60 s)`; grows while the window stays in front |
+
+A sample **extends** the newest row of that `(Computer, UserAccount)` when all hold:
+
+- same `Program` and same `WindowTitle` (another tab or title starts a new row),
+- the pause since `EndTime` is at most `max(120, 3 * window_sample_sec)` seconds
+  (a real break such as idle time, logoff or sleep starts a new row; a few missed
+  samples do not),
+- the sample is not older than `EventTime`.
+
+Otherwise a new row is inserted. A sample that lies inside an existing group (the
+agent re-sent a block whose ACK was lost) changes nothing, so retries never inflate
+`SessionMinutes`. Samples of one request are processed oldest first, inside the same
+transaction as the rest of `/ingest`.
+
+A group in progress is updated on every push, so `EndTime` and `SessionMinutes` rise
+live (one sample shows `0` minutes until the next one arrives).
+
+Data written before 2026.10.26.5 (one row per sample, `EndTime IS NULL`) is merged once
+by `server-python/sql/migrate_2026.10.26.5.sql`. Rows not migrated still display
+correctly (`from = to`).
 
 ---
 
@@ -186,8 +253,10 @@ Response:
   "kind": "both",
   "limit": 5,
   "items": [
-    {"type": "window", "time": "2026-10-25T18:02:40+01:00", "user": "LEGION\\vvojc",
-     "computer": "LEGION", "program": "msedge", "window": "Blokada reklam - Edge"},
+    {"type": "window", "time": "2026-10-25T18:02:40+01:00",
+     "from": "2026-10-25T17:49:10+01:00", "to": "2026-10-25T18:02:40+01:00", "minutes": 13, "active": true,
+     "user": "LEGION\\vvojc", "computer": "LEGION", "program": "msedge",
+     "window": "Blokada reklam - Edge"},
     {"type": "web", "time": "2026-10-25T18:01:05+01:00", "user": "LEGION\\vvojc",
      "computer": "LEGION", "url": "https://github.com/kriskomp", "title": "kriskomp", "visits": 2}
   ],
@@ -200,7 +269,14 @@ Response:
 
 - **URLs never include the query string or fragment** (`scheme://host/path` only).
   Query strings often hold login codes and session tokens.
-- `time` is local time with its offset (the database stores local time; the offset
+- **Window items are rows of *Window grouping***: `from` = first time in front in that session,
+  `to` = last time in front, `minutes` = `SessionMinutes` (total time in front, not `to - from`).
+  `time` equals `to` (kept for compatibility) and is what the list is sorted by.
+- `active` (window items only): `true` while the window is in front now, i.e. it is the
+  newest row of that account and its `to` is not older than `max(120, 3 * window_sample_sec)` s
+  (per account). Nothing is stored: when the PC is turned off no more samples arrive and the
+  row simply stops being active; its `to` is the closing time (accurate to one sample).
+- `time`, `from`, `to` are local time with its offset (the database stores local time; the offset
   is +01:00 in winter and +02:00 in summer).
 - `summary` always holds the newest record of each kind, even when `limit` cuts the list
   or `kind` leaves one kind out. `null` means that kind has no data at all.

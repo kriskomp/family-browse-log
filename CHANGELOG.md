@@ -3,6 +3,27 @@
 All notable changes to this project are documented here.
 Versions are date-based: `YYYY.MM.DD.N`.
 
+## 2026.10.26.5
+
+Window activity: one row per window per session.
+
+### Changed
+- `dbo.WindowActivity` holds **one row per window (program + title) per session** instead of one row per 30-second sample. Coming back to a window in the same session updates its row: `EndTime` (last time in front) moves forward and `ActiveSeconds` / `SessionMinutes` (total time in front) grow. Switching windows no longer creates duplicate rows.
+- Browsers (`FBL_WINDOW_GROUP_BY_PROGRAM`, default `msedge,chrome,firefox,brave,opera`) have **one row per session**, whatever the tab: the title changes with every tab or tab count, so the row keeps the latest title (pages are in `BrowsingHistory`). Other programs: one row per program + window title.
+- A session ends after no sample of any window for `idle_limit_sec + 2 * window_sample_sec` (default 6 min): PC off, asleep, logged off. Idle reading or a film does not split it. Gaps are measured on sample times, so offline queues, connection outages and server restarts never start a new session.
+- Re-sent blocks are skipped (samples not newer than the account's newest `EndTime`) and not counted in `accepted_windows`.
+- `GET /activity` window items carry `from`, `to`, `minutes` and `active` (`true` = window in front now; computed at read time, nothing stored). `time` is kept and equals `to`.
+- Agent: queue file names are UTC timestamps, so blocks are always sent oldest first, also when the clock is turned back at the end of DST. `session_min` in the payload is ignored.
+
+### Added
+- Columns `EndTime`, `SessionStart`, `ActiveSeconds` and index `IX_WindowActivity_session` on `dbo.WindowActivity` (`schema.sql`, idempotent).
+- `server-python/sql/migrate_2026.10.26.5.sql`: one-off, preview-first, re-runnable merge of existing rows into sessions (browsers: one row per session).
+- `.env` key `FBL_WINDOW_GROUP_BY_PROGRAM`.
+
+### Notes
+- DB login needs `UPDATE` on `dbo.WindowActivity`.
+- Upgrade steps: `server-python/README.md`, *Upgrading to 2026.10.26.5*.
+
 ## 2026.10.25.4
 
 Read API for Home Assistant (server side).

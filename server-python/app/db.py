@@ -167,17 +167,23 @@ def fetch_web_activity(cur, users: list[str], computer: str | None, limit: int) 
 
 
 def fetch_window_activity(cur, users: list[str], computer: str | None, limit: int) -> list[dict]:
-    """Newest window samples, newest first."""
+    """Newest window rows (one row = one window in one session), newest first.
+
+    time = last time in front, start = first time in front, minutes = SessionMinutes
+    (total time in front).
+    """
     where, params = _filters("UserAccount", "Computer", users, computer)
     cur.execute(
         f"""
-        SELECT TOP ({int(limit)}) Computer, UserAccount, EventTime, Program, WindowTitle
+        SELECT TOP ({int(limit)}) Computer, UserAccount, EventTime,
+               ISNULL(EndTime, EventTime), SessionMinutes, Program, WindowTitle
           FROM dbo.WindowActivity {where}
-         ORDER BY EventTime DESC
+         ORDER BY ISNULL(EndTime, EventTime) DESC, Id DESC
         """,
         params,
     )
     return [
-        {"computer": r[0], "user": r[1], "time": r[2], "program": r[3], "window": r[4]}
+        {"computer": r[0], "user": r[1], "start": r[2], "time": r[3],
+         "minutes": r[4], "program": r[5], "window": r[6]}
         for r in cur.fetchall()
     ]

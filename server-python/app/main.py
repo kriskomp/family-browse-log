@@ -17,7 +17,8 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from . import db
-from .activity import KINDS, clamp_limit, local_iso, merge_activity
+from .activity import (KINDS, clamp_limit, local_iso, mark_active, merge_activity,
+                       merge_gap_sec)
 from .config import get_settings
 from .ingest import process_ingest
 from .models import (ActivityResponse, ConfigResponse, IngestRequest,
@@ -145,6 +146,15 @@ def get_activity(
         win = (db.fetch_window_activity(cur, user, computer, n)
                if kind in ("windows", "both") else [])
         # summary = newest record of each kind, even when that kind is not in items
+        # "active" = window in front now (merge_gap_sec, per account settings)
+        gaps: dict[tuple, int] = {}
+
+        def gap_for(c, u):
+            if (c, u) not in gaps:
+                gaps[(c, u)] = merge_gap_sec(db.resolve_settings(cur, c, u)["window_sample_sec"])
+            return gaps[(c, u)]
+
+        mark_active(win, datetime.now(tz).replace(tzinfo=None), gap_for)
         latest_web = web if kind in ("web", "both") else db.fetch_web_activity(cur, user, computer, 1)
         latest_win = win if kind in ("windows", "both") else db.fetch_window_activity(cur, user, computer, 1)
 
