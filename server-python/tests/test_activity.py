@@ -6,8 +6,8 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.activity import (can_extend, clamp_limit, clean_url, local_iso, merge_activity,
-                          mark_active, merge_gap_sec, minutes_between)
+from app.activity import (clamp_limit, clean_url, group_samples, local_iso, mark_active,
+                          merge_activity, merge_gap_sec, session_gap_sec)
 
 TZ = ZoneInfo("Europe/Warsaw")
 
@@ -152,41 +152,98 @@ class SummaryIndependentOfKind(unittest.TestCase):
         self.assertEqual([i["type"] for i in items], ["web"])
         self.assertEqual(summary["last_window_at"], "2026-10-20T11:00:00+02:00")
 
-class WindowGrouping(unittest.TestCase):
-    G = {"start": datetime(2026, 10, 26, 18, 45, 0), "end": datetime(2026, 10, 26, 18, 45, 30),
-         "program": "msedge", "window": "Chess"}
+def T(h, m, sec=0):
+    return datetime(2026, 10, 26, h, m, sec)
 
-    def test_minutes_between_floors(self):
-        a = datetime(2026, 10, 26, 18, 45, 0)
-        self.assertEqual(minutes_between(a, datetime(2026, 10, 26, 18, 45, 59)), 0)
-        self.assertEqual(minutes_between(a, datetime(2026, 10, 26, 18, 46, 0)), 1)
-        self.assertEqual(minutes_between(a, datetime(2026, 10, 26, 18, 57, 30)), 12)
-        self.assertEqual(minutes_between(a, datetime(2026, 10, 26, 18, 44, 0)), 0)
 
-    def test_gap(self):
+class WindowSessions(unittest.TestCase):
+    GAP, SAMPLE = 360, 30
+
+    def run_(self, samples, last_end=None, session=None, rows=None):
+        rows = {} if rows is None else rows
+        touched, resent = group_samples(last_end, session, rows, samples, self.GAP, self.SAMPLE)
+        return touched, resent, rows
+
+    def test_gaps(self):
         self.assertEqual(merge_gap_sec(30), 120)
         self.assertEqual(merge_gap_sec(60), 180)
+        self.assertEqual(session_gap_sec(30, 300), 360)
+        self.assertEqual(session_gap_sec(30, 0), 120)
 
-    def test_extends_same_window(self):
-        t = datetime(2026, 10, 26, 18, 46, 0)
-        self.assertTrue(can_extend(self.G, t, "msedge", "Chess", 120))
+    def test_switching_back_updates_same_row(self):
+        s = [(T(20, 25, 0), "msedge", "CB"), (T(20, 25, 30), "msedge", "CB"),
+             (T(20, 26, 0), "explorer", "boot"), (T(20, 26, 30), "msedge", "CB"),
+             (T(20, 36, 30), "msedge", "CB")]  # back after 10 min in another window
+        # samples kept coming in Notepad++ meanwhile, so the session goes on
+        mid = [(T(20, 27, 0) + (T(20, 0, 30) - T(20, 0, 0)) * i, "notepad++", "n")
+               for i in range(19)]
+        samples = s[:4] + mid + s[4:]
+        touched, resent, rows = self.run_(samples)
+        self.assertEqual(resent, 0)
+        self.assertEqual(len(touched), 3)               # CB, boot, notepad - no duplicates
+        cb = rows[("msedge", "CB")]
+        self.assertEqual(cb["start"], T(20, 25, 0))
+        self.assertEqual(cb["end"], T(20, 36, 30))
+        self.assertEqual(cb["secs"], 4 * 30)            # only time in front
+        self.assertEqual({r["session"] for r in touched}, {T(20, 25, 0)})
 
-    def test_new_group_on_other_title_program_or_gap(self):
-        t = datetime(2026, 10, 26, 18, 46, 0)
-        self.assertFalse(can_extend(self.G, t, "msedge", "Other", 120))
-        self.assertFalse(can_extend(self.G, t, "chrome", "Chess", 120))
-        self.assertFalse(can_extend(self.G, datetime(2026, 10, 26, 18, 50, 0), "msedge", "Chess", 120))
-        self.assertFalse(can_extend(None, t, "msedge", "Chess", 120))
+    def test_long_pause_starts_new_session(self):
+        samples = [(T(20, 0), "msedge", "CB"), (T(20, 7), "msedge", "CB")]  # 7 min > 6 min
+        touched, _, _ = self.run_(samples)
+        self.assertEqual(len(touched), 2)
+        self.assertEqual([r["session"] for r in touched], [T(20, 0), T(20, 7)])
 
-    def test_resent_sample_inside_group_is_extend(self):
-        self.assertTrue(can_extend(self.G, datetime(2026, 10, 26, 18, 45, 0), "msedge", "Chess", 120))
+    def test_idle_pause_below_gap_keeps_session(self):
+        samples = [(T(20, 0), "msedge", "film"), (T(20, 5, 30), "msedge", "film")]  # 5.5 min idle
+        touched, _, _ = self.run_(samples)
+        self.assertEqual(len(touched), 1)
+        self.assertEqual(touched[0]["secs"], 60)
 
-    def test_sample_before_group_is_new(self):
-        self.assertFalse(can_extend(self.G, datetime(2026, 10, 26, 18, 44, 0), "msedge", "Chess", 120))
+    def test_continues_session_from_db(self):
+        row = {"id": 7, "start": T(20, 0), "end": T(20, 1), "secs": 90,
+               "session": T(19, 50), "program": "msedge", "window": "CB"}
+        rows = {("msedge", "CB"): row}
+        touched, _, _ = self.run_([(T(20, 3), "msedge", "CB")], T(20, 2), T(19, 50), rows)
+        self.assertEqual(touched, [row])
+        self.assertEqual(row["id"], 7)
+        self.assertEqual(row["end"], T(20, 3))
+        self.assertEqual(row["secs"], 120)
+
+    def test_resent_block_is_skipped(self):
+        row = {"id": 7, "start": T(20, 0), "end": T(20, 1), "secs": 90,
+               "session": T(20, 0), "program": "msedge", "window": "CB"}
+        rows = {("msedge", "CB"): row}
+        touched, resent, _ = self.run_([(T(20, 0, 30), "msedge", "CB"), (T(20, 1), "msedge", "CB")],
+                                       T(20, 1), T(20, 0), rows)
+        self.assertEqual((touched, resent), ([], 2))
+        self.assertEqual(row["secs"], 90)
+
+    def test_delayed_queue_keeps_original_session(self):
+        # agent was offline for an hour; samples arrive late but carry their own times
+        row = {"id": 7, "start": T(18, 0), "end": T(18, 10), "secs": 600,
+               "session": T(18, 0), "program": "msedge", "window": "CB"}
+        rows = {("msedge", "CB"): row}
+        late = [(T(18, 10, 30), "msedge", "CB"), (T(18, 11), "msedge", "CB")]
+        touched, _, _ = self.run_(late, T(18, 10), T(18, 0), rows)
+        self.assertEqual(touched, [row])
+        self.assertEqual(row["secs"], 660)
+
+    def test_unknown_session_from_old_data_starts_new(self):
+        touched, _, _ = self.run_([(T(20, 1), "msedge", "CB")], T(20, 0), None, {})
+        self.assertEqual(touched[0]["id"], None)
+        self.assertEqual(touched[0]["session"], T(20, 1))
+
+    def test_new_session_does_not_reuse_old_rows(self):
+        row = {"id": 7, "start": T(18, 0), "end": T(18, 10), "secs": 600,
+               "session": T(18, 0), "program": "msedge", "window": "CB"}
+        rows = {("msedge", "CB"): row}
+        touched, _, _ = self.run_([(T(20, 0), "msedge", "CB")], T(18, 10), T(18, 0), rows)
+        self.assertIsNone(touched[0]["id"])
+        self.assertEqual(row["secs"], 600)
 
     def test_none_and_empty_equal(self):
-        g = dict(self.G, program=None, window=None)
-        self.assertTrue(can_extend(g, datetime(2026, 10, 26, 18, 45, 30), "", "", 120))
+        touched, _, _ = self.run_([(T(20, 0), None, None), (T(20, 0, 30), "", "")])
+        self.assertEqual(len(touched), 1)
 
 
 class ActiveFlag(unittest.TestCase):

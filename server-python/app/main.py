@@ -146,7 +146,7 @@ def get_activity(
         win = (db.fetch_window_activity(cur, user, computer, n)
                if kind in ("windows", "both") else [])
         # summary = newest record of each kind, even when that kind is not in items
-        # "active" = window still open; same gap as the write path (ingest.py)
+        # "active" = window in front now (merge_gap_sec, per account settings)
         gaps: dict[tuple, int] = {}
 
         def gap_for(c, u):

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from .config import get_settings
-from .activity import can_extend, merge_gap_sec, minutes_between
+from .activity import group_samples, session_gap_sec
 from .db import get_last_visit_id_for_profile, resolve_settings
 from .models import IngestRequest, IngestResponse
 
@@ -66,24 +66,33 @@ def process_ingest(conn, req: IngestRequest) -> IngestResponse:
     VALUES (%(c)s, %(u)s, %(p)s, %(day)s, %(url)s, %(title)s, %(cnt)s, %(first)s, %(last)s);
     """
 
-    # Window samples are grouped: consecutive samples of the same program + title
-    # extend ONE row (EndTime and SessionMinutes grow) instead of adding a row each.
-    select_latest_win = """
-    SELECT TOP 1 Id, EventTime, ISNULL(EndTime, EventTime), Program, WindowTitle
+    # Window samples are grouped: ONE row per window (program + title) per session of
+    # the account. Returning to a window updates its row; nothing is duplicated.
+    select_last_win = """
+    SELECT TOP 1 ISNULL(EndTime, EventTime), SessionStart
       FROM dbo.WindowActivity
      WHERE Computer=%(c)s AND UserAccount=%(u)s
-     ORDER BY Id DESC;
+     ORDER BY ISNULL(EndTime, EventTime) DESC, Id DESC;
+    """
+
+    select_session_rows = """
+    SELECT Id, EventTime, ISNULL(EndTime, EventTime), ActiveSeconds, Program, WindowTitle
+      FROM dbo.WindowActivity
+     WHERE Computer=%(c)s AND UserAccount=%(u)s AND SessionStart=%(s)s;
     """
 
     insert_win = """
     INSERT INTO dbo.WindowActivity
-        (Computer, UserAccount, EventTime, EndTime, SessionMinutes, Program, WindowTitle)
-    VALUES (%(c)s, %(u)s, %(t)s, %(t)s, 0, %(prog)s, %(win)s);
-    SELECT CAST(SCOPE_IDENTITY() AS BIGINT);
+        (Computer, UserAccount, SessionStart, EventTime, EndTime,
+         ActiveSeconds, SessionMinutes, Program, WindowTitle)
+    VALUES (%(c)s, %(u)s, %(s)s, %(start)s, %(end)s,
+            %(secs)s, %(secs)s / 60, %(prog)s, %(win)s);
     """
 
-    extend_win = """
-    UPDATE dbo.WindowActivity SET EndTime=%(t)s, SessionMinutes=%(m)s WHERE Id=%(id)s;
+    update_win = """
+    UPDATE dbo.WindowActivity
+       SET EndTime=%(end)s, ActiveSeconds=%(secs)s, SessionMinutes=%(secs)s / 60
+     WHERE Id=%(id)s;
     """
 
     upsert_state = """
@@ -108,34 +117,35 @@ def process_ingest(conn, req: IngestRequest) -> IngestResponse:
                 "cnt": a["count"], "first": a["first"], "last": a["last"],
             })
 
+        resent = 0
         if req.windows:
-            gap = merge_gap_sec(resolve_settings(cur, req.computer, req.user)
-                                .get("window_sample_sec", 30))
-            cur.execute(select_latest_win, {"c": req.computer, "u": req.user})
+            st = resolve_settings(cur, req.computer, req.user)
+            sample_sec = st["window_sample_sec"]
+            key = {"c": req.computer, "u": req.user}
+            cur.execute(select_last_win, key)
             row = cur.fetchone()
-            group = None if row is None else {
-                "id": row[0], "start": row[1], "end": row[2],
-                "program": row[3], "window": row[4]}
+            last_end, session = (row[0], row[1]) if row else (None, None)
+            rows: dict = {}
+            if session is not None:
+                cur.execute(select_session_rows, dict(key, s=session))
+                for r in cur.fetchall():
+                    rows[(r[4] or None, r[5] or None)] = {
+                        "id": r[0], "start": r[1], "end": r[2], "secs": int(r[3] or 0),
+                        "session": session, "program": r[4], "window": r[5]}
 
-            # oldest first, so a block that arrives out of order still groups
-            for w in sorted(req.windows, key=lambda x: x.ts):
-                t = _local_dt(w.ts, tz)
-                prog = (w.program or None)
-                win = ((w.window or "")[:2048] or None)
-                if can_extend(group, t, prog, win, gap):
-                    if t > group["end"]:
-                        group["end"] = t
-                        cur.execute(extend_win, {
-                            "id": group["id"], "t": t,
-                            "m": minutes_between(group["start"], t)})
-                    # t inside the group = a re-sent sample, nothing to change
+            samples = sorted(
+                ((_local_dt(w.ts, tz), w.program, (w.window or "")[:2048]) for w in req.windows),
+                key=lambda x: x[0])
+            touched, resent = group_samples(last_end, session, rows, samples,
+                                             session_gap_sec(sample_sec, st["idle_limit_sec"]),
+                                             sample_sec)
+            for g in touched:
+                if g["id"] is None:
+                    cur.execute(insert_win, dict(key, s=g["session"], start=g["start"],
+                                                 end=g["end"], secs=g["secs"],
+                                                 prog=g["program"], win=g["window"]))
                 else:
-                    cur.execute(insert_win, {
-                        "c": req.computer, "u": req.user, "t": t,
-                        "prog": prog, "win": win})
-                    new_id = cur.fetchone()[0]
-                    group = {"id": new_id, "start": t, "end": t,
-                             "program": prog, "window": win}
+                    cur.execute(update_win, {"id": g["id"], "end": g["end"], "secs": g["secs"]})
 
         if max_id > last_id:
             cur.execute(upsert_state, {
@@ -149,10 +159,11 @@ def process_ingest(conn, req: IngestRequest) -> IngestResponse:
         conn.rollback()
         raise
 
+    windows_accepted = len(req.windows) - resent
     return IngestResponse(
         ok=True,
         last_visit_id=max_id,
         accepted_visits=len(new_visits),
         skipped_visits=skipped,
-        accepted_windows=len(req.windows),
+        accepted_windows=windows_accepted,
     )

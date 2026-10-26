@@ -167,9 +167,10 @@ def fetch_web_activity(cur, users: list[str], computer: str | None, limit: int) 
 
 
 def fetch_window_activity(cur, users: list[str], computer: str | None, limit: int) -> list[dict]:
-    """Newest window groups (one row = one uninterrupted stay in a window), newest first.
+    """Newest window rows (one row = one window in one session), newest first.
 
-    time = last sample of the group, start = first sample, minutes = SessionMinutes.
+    time = last time in front, start = first time in front, minutes = SessionMinutes
+    (total time in front).
     """
     where, params = _filters("UserAccount", "Computer", users, computer)
     cur.execute(

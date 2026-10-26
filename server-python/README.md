@@ -54,21 +54,20 @@ GRANT SELECT ON dbo.WindowActivity  TO [<login>];
 GRANT SELECT ON cfg.ExcludedUser    TO [<login>];
 ```
 
-## Upgrading to 2026.10.26.5 (window grouping)
+## Upgrading to 2026.10.26.5 (window activity per session)
 
-1. Add the new column (idempotent; also in `sql/schema.sql`), as a separate statement:
+1. Run `sql/schema.sql` (idempotent). It adds `EndTime`, `SessionStart`, `ActiveSeconds`
+   and the index `IX_WindowActivity_session` to `dbo.WindowActivity`.
+2. Pull the code and restart the service.
+3. Right after that, run `sql/migrate_2026.10.26.5.sql` once: preview with `@apply = 0`,
+   then `@apply = 1`. It merges older rows (one row per 30 s sample) into one row per
+   window per session.
+4. Update the agent (`client-powershell/monitor.ps1`): queue file names are now UTC.
+   An older agent keeps working; it can only misorder its queue in the hour the clock
+   is turned back.
 
-   ```sql
-   IF COL_LENGTH('dbo.WindowActivity','EndTime') IS NULL
-       ALTER TABLE dbo.WindowActivity ADD EndTime DATETIME2(7) NULL;
-   ```
-2. Pull the code and restart the service. New samples are grouped from now on.
-3. Optional, once: merge the old one-row-per-sample rows with
-   `sql/migrate_2026.10.26.5.sql`. It previews first (`@apply = 0`), then applies with
-   `@apply = 1`. Rows not migrated are still shown correctly (`from = to`).
-
-The login needs `UPDATE` on `dbo.WindowActivity` (grouping updates the newest row).
-Agents need no update: they keep sending one sample per `window_sample_sec`.
+The DB login needs `UPDATE` on `dbo.WindowActivity`. Grouping rules: `docs/api.md`,
+*Window grouping*.
 
 ## Tuning settings (no code changes)
 

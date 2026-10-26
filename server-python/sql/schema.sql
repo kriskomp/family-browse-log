@@ -50,9 +50,15 @@ BEGIN
 END
 GO
 
-/* Active-window / app activity. One row = one uninterrupted stay in a window:
-   EventTime = first sample, EndTime = last sample, SessionMinutes = whole minutes
-   between them (grows while the window stays in front). */
+/* Active-window / app activity. One row = one window (Program + WindowTitle) in one
+   session of the account. Returning to a window in the same session updates its row.
+   SessionStart   = first sample of the session (groups the rows of one session)
+   EventTime      = first time the window was in front in that session (from)
+   EndTime        = last time it was in front (to)
+   ActiveSeconds  = total time in front (window_sample_sec per sample)
+   SessionMinutes = ActiveSeconds / 60
+   A session ends after a pause longer than idle_limit_sec + 2 * window_sample_sec
+   with no sample of any window (PC off, asleep, logged off). */
 IF OBJECT_ID('dbo.WindowActivity','U') IS NULL
 BEGIN
     CREATE TABLE dbo.WindowActivity (
@@ -61,6 +67,8 @@ BEGIN
         UserAccount    NVARCHAR(128)  NOT NULL,
         EventTime      DATETIME2(7)   NOT NULL,
         EndTime        DATETIME2(7)   NULL,
+        SessionStart   DATETIME2(7)   NULL,
+        ActiveSeconds  INT            NOT NULL CONSTRAINT DF_WindowActivity_ActiveSeconds DEFAULT 0,
         SessionMinutes INT            NOT NULL,
         Program        NVARCHAR(256)  NULL,
         WindowTitle    NVARCHAR(2048) NULL,
@@ -72,11 +80,23 @@ BEGIN
 END
 GO
 
-/* Upgrade from 2026.10.25.4 and older: add EndTime (idempotent).
-   Existing rows keep their single sample: EndTime = EventTime.
-   To merge old one-row-per-sample data run sql/migrate_2026.10.26.5.sql. */
+/* Upgrade from 2026.10.25.4 and older (idempotent). Existing rows are merged by
+   sql/migrate_2026.10.26.5.sql. */
 IF COL_LENGTH('dbo.WindowActivity','EndTime') IS NULL
     ALTER TABLE dbo.WindowActivity ADD EndTime DATETIME2(7) NULL;
+IF COL_LENGTH('dbo.WindowActivity','SessionStart') IS NULL
+    ALTER TABLE dbo.WindowActivity ADD SessionStart DATETIME2(7) NULL;
+IF COL_LENGTH('dbo.WindowActivity','ActiveSeconds') IS NULL
+    ALTER TABLE dbo.WindowActivity ADD ActiveSeconds INT NOT NULL
+        CONSTRAINT DF_WindowActivity_ActiveSeconds DEFAULT 0;
+GO
+
+/* the write path finds the newest row and the rows of the current session */
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_WindowActivity_session'
+               AND object_id = OBJECT_ID('dbo.WindowActivity'))
+    CREATE INDEX IX_WindowActivity_session
+        ON dbo.WindowActivity (Computer, UserAccount, SessionStart)
+        INCLUDE (EndTime);
 GO
 
 /* Resume state - last processed Edge visit id per (Computer, UserAccount, EdgeProfile). */

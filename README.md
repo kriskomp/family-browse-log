@@ -37,7 +37,7 @@ The two parts talk only through a JSON HTTP contract documented in
 
 All v2 tables live in a dedicated MS SQL database **`monitor`**, split by schema:
 
-- **`dbo`** — incoming data: `BrowsingHistory`, `WindowActivity` (one row per uninterrupted stay in a window: from, to, `SessionMinutes`), `IngestState`
+- **`dbo`** — incoming data: `BrowsingHistory`, `WindowActivity` (one row per window per session: from, to, total time in front), `IngestState`
 - **`cfg`** — configuration: `Setting`, `ExcludedUser`, `Device`
 
 See [`server-python/sql/schema.sql`](server-python/sql/schema.sql) for the schema and
