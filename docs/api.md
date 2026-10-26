@@ -218,7 +218,7 @@ Response:
   "limit": 5,
   "items": [
     {"type": "window", "time": "2026-10-25T18:02:40+01:00",
-     "from": "2026-10-25T17:49:10+01:00", "to": "2026-10-25T18:02:40+01:00", "minutes": 13,
+     "from": "2026-10-25T17:49:10+01:00", "to": "2026-10-25T18:02:40+01:00", "minutes": 13, "active": true,
      "user": "LEGION\\vvojc", "computer": "LEGION", "program": "msedge",
      "window": "Blokada reklam - Edge"},
     {"type": "web", "time": "2026-10-25T18:01:05+01:00", "user": "LEGION\\vvojc",
@@ -236,6 +236,11 @@ Response:
 - **Window items are groups** (see *Window grouping*): `from` = first sample, `to` = last
   sample, `minutes` = `SessionMinutes`. `time` equals `to` (kept for compatibility) and is
   what the list is sorted by, so a window you are still in stays on top. Web items have `time` only.
+- `active` (window items only): `true` while the window is still open, i.e. it is the newest
+  group of that account and its `to` is not older than the write path's grouping gap
+  (`max(120, 3 * window_sample_sec)` s, per account). Nothing is stored: when the PC is turned
+  off no further sample arrives, so the group simply stops being active after that gap and its
+  `to` is the closing time (accurate to one sample interval). Web items have no `active`.
 - `time`, `from`, `to` are local time with its offset (the database stores local time; the offset
   is +01:00 in winter and +02:00 in summer).
 - `summary` always holds the newest record of each kind, even when `limit` cuts the list

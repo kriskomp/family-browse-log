@@ -28,6 +28,23 @@ def merge_gap_sec(sample_sec: int) -> int:
     return max(120, 3 * int(sample_sec))
 
 
+def mark_active(window_rows: list[dict], now: datetime, gap_for) -> None:
+    """Set row['active'] on every window row (in place).
+
+    A window is active (still open) when it is the newest row of its account and its
+    last sample is not older than the same gap the write path uses to extend a group
+    (merge_gap_sec). Older rows of an account are never active, even when they ended
+    a moment ago. gap_for(computer, user) -> seconds.
+    """
+    seen: set[tuple] = set()
+    for r in sorted(window_rows, key=lambda x: x["time"], reverse=True):
+        key = (r["computer"], r["user"])
+        newest = key not in seen
+        seen.add(key)
+        r["active"] = bool(newest and (now - r["time"]).total_seconds()
+                           <= gap_for(r["computer"], r["user"]))
+
+
 def can_extend(group: dict | None, t: datetime, program: str | None,
                title: str | None, gap_sec: int) -> bool:
     """True when the sample at t continues `group` (same program and title, no
@@ -108,6 +125,7 @@ def merge_activity(web_rows: list[dict], window_rows: list[dict],
             "from": local_iso(r["start"], tz) if r.get("start") else local_iso(r["time"], tz),
             "to": local_iso(r["time"], tz),
             "minutes": int(r.get("minutes") or 0),
+            "active": bool(r.get("active", False)),
             "user": r["user"],
             "computer": r["computer"],
             "program": r["program"] or "",

@@ -7,7 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.activity import (can_extend, clamp_limit, clean_url, local_iso, merge_activity,
-                          merge_gap_sec, minutes_between)
+                          mark_active, merge_gap_sec, minutes_between)
 
 TZ = ZoneInfo("Europe/Warsaw")
 
@@ -187,6 +187,51 @@ class WindowGrouping(unittest.TestCase):
     def test_none_and_empty_equal(self):
         g = dict(self.G, program=None, window=None)
         self.assertTrue(can_extend(g, datetime(2026, 10, 26, 18, 45, 30), "", "", 120))
+
+
+class ActiveFlag(unittest.TestCase):
+    NOW = datetime(2026, 10, 26, 19, 0, 0)
+
+    def row(self, end, user="u"):
+        return {"computer": "c", "user": user, "time": end, "start": end, "minutes": 0,
+                "program": "p", "window": "w"}
+
+    def test_newest_recent_row_is_active(self):
+        rows = [self.row(datetime(2026, 10, 26, 18, 59, 0))]
+        mark_active(rows, self.NOW, lambda c, u: 120)
+        self.assertTrue(rows[0]["active"])
+
+    def test_old_row_is_not_active(self):
+        rows = [self.row(datetime(2026, 10, 26, 18, 55, 0))]
+        mark_active(rows, self.NOW, lambda c, u: 120)
+        self.assertFalse(rows[0]["active"])
+
+    def test_boundary_is_active(self):
+        rows = [self.row(datetime(2026, 10, 26, 18, 58, 0))]
+        mark_active(rows, self.NOW, lambda c, u: 120)
+        self.assertTrue(rows[0]["active"])
+
+    def test_only_newest_row_per_account(self):
+        rows = [self.row(datetime(2026, 10, 26, 18, 59, 0)),
+                self.row(datetime(2026, 10, 26, 18, 59, 30)),
+                self.row(datetime(2026, 10, 26, 18, 59, 40), user="other")]
+        mark_active(rows, self.NOW, lambda c, u: 120)
+        self.assertEqual([r["active"] for r in rows], [False, True, True])
+
+    def test_gap_per_account(self):
+        rows = [self.row(datetime(2026, 10, 26, 18, 56, 0))]
+        mark_active(rows, self.NOW, lambda c, u: 300)
+        self.assertTrue(rows[0]["active"])
+
+    def test_active_in_item(self):
+        rows = [self.row(datetime(2026, 10, 26, 18, 59, 0))]
+        mark_active(rows, self.NOW, lambda c, u: 120)
+        items, _ = merge_activity([], rows, TZ, 5)
+        self.assertIs(items[0]["active"], True)
+
+    def test_item_defaults_inactive(self):
+        items, _ = merge_activity([], [self.row(datetime(2026, 10, 26, 18, 0, 0))], TZ, 5)
+        self.assertIs(items[0]["active"], False)
 
 
 class WindowItemFields(unittest.TestCase):
