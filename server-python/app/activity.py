@@ -12,6 +12,42 @@ from zoneinfo import ZoneInfo
 KINDS = ("web", "windows", "both")
 
 
+# ---- window-activity grouping (write path, used by ingest.py) ---------------
+
+def minutes_between(start: datetime, end: datetime) -> int:
+    """Whole minutes elapsed from start to end (never negative)."""
+    return max(0, int((end - start).total_seconds() // 60))
+
+
+def merge_gap_sec(sample_sec: int) -> int:
+    """Longest pause between two samples that still belongs to the same group.
+
+    A few missed samples (agent cycle jitter, one slow push) must not split a
+    group, but a real break (idle, logoff, PC asleep) must. At least 120 s.
+    """
+    return max(120, 3 * int(sample_sec))
+
+
+def can_extend(group: dict | None, t: datetime, program: str | None,
+               title: str | None, gap_sec: int) -> bool:
+    """True when the sample at t continues `group` (same program and title, no
+    longer pause than gap_sec, not before the group started).
+
+    group: {'start', 'end', 'program', 'window'} (naive local datetimes).
+    A sample inside [start, end] also counts: it is a re-send of an old sample
+    and changes nothing.
+    """
+    if group is None:
+        return False
+    if (group["program"] or None) != (program or None):
+        return False
+    if (group["window"] or None) != (title or None):
+        return False
+    if t < group["start"]:
+        return False
+    return (t - group["end"]).total_seconds() <= gap_sec
+
+
 def clean_url(url: str | None) -> str:
     """scheme://host/path - query string and fragment removed.
 
@@ -46,7 +82,8 @@ def merge_activity(web_rows: list[dict], window_rows: list[dict],
                    latest_window: list[dict] | None = None) -> tuple[list[dict], dict]:
     """Merge web and window rows into one timeline, newest first.
 
-    Rows are dicts with a naive local 'time' key. Sorting uses the naive time, so
+    Rows are dicts with a naive local 'time' key (for windows: the END of the group;
+    'start' and 'minutes' describe the group). Sorting uses the naive time, so
     the order stays right across a DST change.
 
     summary always reports the newest record of EACH kind. latest_web / latest_window
@@ -68,6 +105,9 @@ def merge_activity(web_rows: list[dict], window_rows: list[dict],
         timed.append((r["time"], {
             "type": "window",
             "time": local_iso(r["time"], tz),
+            "from": local_iso(r["start"], tz) if r.get("start") else local_iso(r["time"], tz),
+            "to": local_iso(r["time"], tz),
+            "minutes": int(r.get("minutes") or 0),
             "user": r["user"],
             "computer": r["computer"],
             "program": r["program"] or "",

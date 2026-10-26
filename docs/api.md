@@ -97,8 +97,8 @@ any window-activity rows gathered since the last push). One profile per request.
 | `visits[].url` | `BrowsingHistory.Url` | truncated to 2048 |
 | `visits[].title` | `BrowsingHistory.Title` | truncated to 1024 |
 | `visits[].ts` | → `Day`, `FirstVisit`, `LastVisit` | epoch seconds UTC |
-| `windows[].ts` | `WindowActivity.EventTime` | epoch seconds UTC |
-| `windows[].session_min` | `WindowActivity.SessionMinutes` | |
+| `windows[].ts` | `WindowActivity.EventTime` (first sample of a group) / `EndTime` (last sample) | epoch seconds UTC; samples are grouped, see below |
+| `windows[].session_min` | — | ignored since 2026.10.26.5; the server computes `SessionMinutes` itself. The agent may send `0`. |
 | `windows[].program` | `WindowActivity.Program` | |
 | `windows[].window` | `WindowActivity.WindowTitle` | truncated to 2048 |
 
@@ -138,9 +138,40 @@ For a single `/ingest` call, inside one DB transaction:
 1. Drop incoming visits with `visit_id <= LastVisitId`.
 2. Aggregate the rest by `(Day, Url)`: `VisitCount`, earliest `FirstVisit`,
    latest `LastVisit` (and its `Title`). Upsert into `dbo.BrowsingHistory`.
-3. Insert `windows` rows into `dbo.WindowActivity`.
+3. Group `windows` samples into `dbo.WindowActivity` (see *Window grouping* below).
 4. Advance `dbo.IngestState.LastVisitId` to the max seen (if greater).
 5. Update `cfg.Device.LastSeen` (heartbeat) for this computer.
+
+### Window grouping
+
+The agent sends one sample every `window_sample_sec` (30 s). The server turns them
+into **one row per uninterrupted stay in a window**, not one row per sample:
+
+| Column | Meaning |
+|---|---|
+| `EventTime` | first sample of the group (**from**) |
+| `EndTime` | last sample of the group (**to**) |
+| `SessionMinutes` | whole minutes between them, `floor((EndTime - EventTime) / 60 s)`; grows while the window stays in front |
+
+A sample **extends** the newest row of that `(Computer, UserAccount)` when all hold:
+
+- same `Program` and same `WindowTitle` (another tab or title starts a new row),
+- the pause since `EndTime` is at most `max(120, 3 * window_sample_sec)` seconds
+  (a real break such as idle time, logoff or sleep starts a new row; a few missed
+  samples do not),
+- the sample is not older than `EventTime`.
+
+Otherwise a new row is inserted. A sample that lies inside an existing group (the
+agent re-sent a block whose ACK was lost) changes nothing, so retries never inflate
+`SessionMinutes`. Samples of one request are processed oldest first, inside the same
+transaction as the rest of `/ingest`.
+
+A group in progress is updated on every push, so `EndTime` and `SessionMinutes` rise
+live (one sample shows `0` minutes until the next one arrives).
+
+Data written before 2026.10.26.5 (one row per sample, `EndTime IS NULL`) is merged once
+by `server-python/sql/migrate_2026.10.26.5.sql`. Rows not migrated still display
+correctly (`from = to`).
 
 ---
 
@@ -186,8 +217,10 @@ Response:
   "kind": "both",
   "limit": 5,
   "items": [
-    {"type": "window", "time": "2026-10-25T18:02:40+01:00", "user": "LEGION\\vvojc",
-     "computer": "LEGION", "program": "msedge", "window": "Blokada reklam - Edge"},
+    {"type": "window", "time": "2026-10-25T18:02:40+01:00",
+     "from": "2026-10-25T17:49:10+01:00", "to": "2026-10-25T18:02:40+01:00", "minutes": 13,
+     "user": "LEGION\\vvojc", "computer": "LEGION", "program": "msedge",
+     "window": "Blokada reklam - Edge"},
     {"type": "web", "time": "2026-10-25T18:01:05+01:00", "user": "LEGION\\vvojc",
      "computer": "LEGION", "url": "https://github.com/kriskomp", "title": "kriskomp", "visits": 2}
   ],
@@ -200,7 +233,10 @@ Response:
 
 - **URLs never include the query string or fragment** (`scheme://host/path` only).
   Query strings often hold login codes and session tokens.
-- `time` is local time with its offset (the database stores local time; the offset
+- **Window items are groups** (see *Window grouping*): `from` = first sample, `to` = last
+  sample, `minutes` = `SessionMinutes`. `time` equals `to` (kept for compatibility) and is
+  what the list is sorted by, so a window you are still in stays on top. Web items have `time` only.
+- `time`, `from`, `to` are local time with its offset (the database stores local time; the offset
   is +01:00 in winter and +02:00 in summer).
 - `summary` always holds the newest record of each kind, even when `limit` cuts the list
   or `kind` leaves one kind out. `null` means that kind has no data at all.

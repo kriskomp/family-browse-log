@@ -6,7 +6,8 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.activity import clamp_limit, clean_url, local_iso, merge_activity
+from app.activity import (can_extend, clamp_limit, clean_url, local_iso, merge_activity,
+                          merge_gap_sec, minutes_between)
 
 TZ = ZoneInfo("Europe/Warsaw")
 
@@ -150,6 +151,56 @@ class SummaryIndependentOfKind(unittest.TestCase):
         items, summary = merge_activity(web, [], TZ, 5, latest_window=latest_win)
         self.assertEqual([i["type"] for i in items], ["web"])
         self.assertEqual(summary["last_window_at"], "2026-10-20T11:00:00+02:00")
+
+class WindowGrouping(unittest.TestCase):
+    G = {"start": datetime(2026, 10, 26, 18, 45, 0), "end": datetime(2026, 10, 26, 18, 45, 30),
+         "program": "msedge", "window": "Chess"}
+
+    def test_minutes_between_floors(self):
+        a = datetime(2026, 10, 26, 18, 45, 0)
+        self.assertEqual(minutes_between(a, datetime(2026, 10, 26, 18, 45, 59)), 0)
+        self.assertEqual(minutes_between(a, datetime(2026, 10, 26, 18, 46, 0)), 1)
+        self.assertEqual(minutes_between(a, datetime(2026, 10, 26, 18, 57, 30)), 12)
+        self.assertEqual(minutes_between(a, datetime(2026, 10, 26, 18, 44, 0)), 0)
+
+    def test_gap(self):
+        self.assertEqual(merge_gap_sec(30), 120)
+        self.assertEqual(merge_gap_sec(60), 180)
+
+    def test_extends_same_window(self):
+        t = datetime(2026, 10, 26, 18, 46, 0)
+        self.assertTrue(can_extend(self.G, t, "msedge", "Chess", 120))
+
+    def test_new_group_on_other_title_program_or_gap(self):
+        t = datetime(2026, 10, 26, 18, 46, 0)
+        self.assertFalse(can_extend(self.G, t, "msedge", "Other", 120))
+        self.assertFalse(can_extend(self.G, t, "chrome", "Chess", 120))
+        self.assertFalse(can_extend(self.G, datetime(2026, 10, 26, 18, 50, 0), "msedge", "Chess", 120))
+        self.assertFalse(can_extend(None, t, "msedge", "Chess", 120))
+
+    def test_resent_sample_inside_group_is_extend(self):
+        self.assertTrue(can_extend(self.G, datetime(2026, 10, 26, 18, 45, 0), "msedge", "Chess", 120))
+
+    def test_sample_before_group_is_new(self):
+        self.assertFalse(can_extend(self.G, datetime(2026, 10, 26, 18, 44, 0), "msedge", "Chess", 120))
+
+    def test_none_and_empty_equal(self):
+        g = dict(self.G, program=None, window=None)
+        self.assertTrue(can_extend(g, datetime(2026, 10, 26, 18, 45, 30), "", "", 120))
+
+
+class WindowItemFields(unittest.TestCase):
+    def test_from_to_minutes(self):
+        win = [{"start": datetime(2026, 10, 26, 18, 45), "time": datetime(2026, 10, 26, 18, 57),
+                "minutes": 12, "program": "msedge", "window": "Chess", "user": "u", "computer": "c"}]
+        items, summary = merge_activity([], win, TZ, 5)
+        it = items[0]
+        self.assertEqual(it["from"], "2026-10-26T18:45:00+01:00")
+        self.assertEqual(it["to"], "2026-10-26T18:57:00+01:00")
+        self.assertEqual(it["time"], it["to"])
+        self.assertEqual(it["minutes"], 12)
+        self.assertEqual(summary["last_window_at"], it["to"])
+
 
 if __name__ == "__main__":
     unittest.main()

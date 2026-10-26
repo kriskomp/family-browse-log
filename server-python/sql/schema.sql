@@ -50,7 +50,9 @@ BEGIN
 END
 GO
 
-/* Active-window / app activity samples. */
+/* Active-window / app activity. One row = one uninterrupted stay in a window:
+   EventTime = first sample, EndTime = last sample, SessionMinutes = whole minutes
+   between them (grows while the window stays in front). */
 IF OBJECT_ID('dbo.WindowActivity','U') IS NULL
 BEGIN
     CREATE TABLE dbo.WindowActivity (
@@ -58,6 +60,7 @@ BEGIN
         Computer       NVARCHAR(64)   NOT NULL,
         UserAccount    NVARCHAR(128)  NOT NULL,
         EventTime      DATETIME2(7)   NOT NULL,
+        EndTime        DATETIME2(7)   NULL,
         SessionMinutes INT            NOT NULL,
         Program        NVARCHAR(256)  NULL,
         WindowTitle    NVARCHAR(2048) NULL,
@@ -67,6 +70,13 @@ BEGIN
     CREATE INDEX IX_WindowActivity_user_time
         ON dbo.WindowActivity (UserAccount, EventTime DESC);
 END
+GO
+
+/* Upgrade from 2026.10.25.4 and older: add EndTime (idempotent).
+   Existing rows keep their single sample: EndTime = EventTime.
+   To merge old one-row-per-sample data run sql/migrate_2026.10.26.5.sql. */
+IF COL_LENGTH('dbo.WindowActivity','EndTime') IS NULL
+    ALTER TABLE dbo.WindowActivity ADD EndTime DATETIME2(7) NULL;
 GO
 
 /* Resume state - last processed Edge visit id per (Computer, UserAccount, EdgeProfile). */

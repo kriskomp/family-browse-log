@@ -45,7 +45,11 @@ folder anywhere — no hard-coded `C:\boot`.
    (`visit_id > cursor`) in blocks of `block_size` from a copy of the `History`
    database (so a running Edge doesn't block it). It drains the whole backlog in
    consecutive blocks on first run, then only the increment.
-3. **Windows**: it samples the active (foreground) window when the user is active.
+3. **Windows**: it samples the active (foreground) window when the user is active
+   (one sample per `window_sample_sec`). The agent only sends the samples; the **server
+   groups** consecutive samples of the same program and title into one row with a
+   from/to time and growing `SessionMinutes` (see `docs/api.md`, *Window grouping*).
+   `session_min` in the payload is ignored.
    Set `window_all=1` in `cfg.Setting` to record every open window instead (v1 style).
 4. **Push**: every `push_interval_sec` it sends queued blocks via `POST /ingest`.
 5. **Offline-safe**: each block is written to the account's own queue

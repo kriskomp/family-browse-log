@@ -3,6 +3,23 @@
 All notable changes to this project are documented here.
 Versions are date-based: `YYYY.MM.DD.N`.
 
+## 2026.10.26.5
+
+Window activity grouping.
+
+### Changed
+- `dbo.WindowActivity` now holds **one row per uninterrupted stay in a window** instead of one row per 30-second sample. `/ingest` extends the newest row while the program and window title stay the same (pause up to `max(120, 3 * window_sample_sec)` s): `EndTime` is moved forward and `SessionMinutes` grows. Re-sent blocks never inflate it.
+- `GET /activity` window items carry `from`, `to` and `minutes`. `time` is kept and equals `to`; the list is sorted by it, so the window in progress stays on top.
+- Agent unchanged: it keeps sending samples; `session_min` in the payload is ignored.
+
+### Added
+- Column `dbo.WindowActivity.EndTime` (`schema.sql` adds it idempotently).
+- `server-python/sql/migrate_2026.10.26.5.sql` — one-off, preview-first merge of existing per-sample rows.
+
+### Notes
+- DB login needs `UPDATE` on `dbo.WindowActivity`.
+- Upgrade steps: `server-python/README.md`, *Upgrading to 2026.10.26.5*.
+
 ## 2026.10.25.4
 
 Read API for Home Assistant (server side).
