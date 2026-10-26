@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from .config import get_settings
-from .activity import group_samples, session_gap_sec
+from .activity import group_key, group_samples, session_gap_sec
 from .db import get_last_visit_id_for_profile, resolve_settings
 from .models import IngestRequest, IngestResponse
 
@@ -78,7 +78,8 @@ def process_ingest(conn, req: IngestRequest) -> IngestResponse:
     select_session_rows = """
     SELECT Id, EventTime, ISNULL(EndTime, EventTime), ActiveSeconds, Program, WindowTitle
       FROM dbo.WindowActivity
-     WHERE Computer=%(c)s AND UserAccount=%(u)s AND SessionStart=%(s)s;
+     WHERE Computer=%(c)s AND UserAccount=%(u)s AND SessionStart=%(s)s
+     ORDER BY ISNULL(EndTime, EventTime);
     """
 
     insert_win = """
@@ -91,7 +92,8 @@ def process_ingest(conn, req: IngestRequest) -> IngestResponse:
 
     update_win = """
     UPDATE dbo.WindowActivity
-       SET EndTime=%(end)s, ActiveSeconds=%(secs)s, SessionMinutes=%(secs)s / 60
+       SET EndTime=%(end)s, ActiveSeconds=%(secs)s, SessionMinutes=%(secs)s / 60,
+           WindowTitle=%(win)s
      WHERE Id=%(id)s;
     """
 
@@ -119,6 +121,7 @@ def process_ingest(conn, req: IngestRequest) -> IngestResponse:
 
         resent = 0
         if req.windows:
+            by_program = get_settings().window_group_by_program
             st = resolve_settings(cur, req.computer, req.user)
             sample_sec = st["window_sample_sec"]
             key = {"c": req.computer, "u": req.user}
@@ -128,8 +131,9 @@ def process_ingest(conn, req: IngestRequest) -> IngestResponse:
             rows: dict = {}
             if session is not None:
                 cur.execute(select_session_rows, dict(key, s=session))
+                # oldest first: if old data has several rows for one key, the newest wins
                 for r in cur.fetchall():
-                    rows[(r[4] or None, r[5] or None)] = {
+                    rows[group_key(r[4], r[5], by_program)] = {
                         "id": r[0], "start": r[1], "end": r[2], "secs": int(r[3] or 0),
                         "session": session, "program": r[4], "window": r[5]}
 
@@ -138,14 +142,15 @@ def process_ingest(conn, req: IngestRequest) -> IngestResponse:
                 key=lambda x: x[0])
             touched, resent = group_samples(last_end, session, rows, samples,
                                              session_gap_sec(sample_sec, st["idle_limit_sec"]),
-                                             sample_sec)
+                                             sample_sec, by_program)
             for g in touched:
                 if g["id"] is None:
                     cur.execute(insert_win, dict(key, s=g["session"], start=g["start"],
                                                  end=g["end"], secs=g["secs"],
                                                  prog=g["program"], win=g["window"]))
                 else:
-                    cur.execute(update_win, {"id": g["id"], "end": g["end"], "secs": g["secs"]})
+                    cur.execute(update_win, {"id": g["id"], "end": g["end"], "secs": g["secs"],
+                                             "win": g["window"]})
 
         if max_id > last_id:
             cur.execute(upsert_state, {

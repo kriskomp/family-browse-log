@@ -60,11 +60,17 @@ GRANT SELECT ON cfg.ExcludedUser    TO [<login>];
    and the index `IX_WindowActivity_session` to `dbo.WindowActivity`.
 2. Pull the code and restart the service.
 3. Right after that, run `sql/migrate_2026.10.26.5.sql` once: preview with `@apply = 0`,
-   then `@apply = 1`. It merges older rows (one row per 30 s sample) into one row per
-   window per session.
+   then `@apply = 1`. It gives older rows a session and merges them into one row per
+   window per session (browsers: one row per session). Keep `@browsers` in the script
+   equal to `FBL_WINDOW_GROUP_BY_PROGRAM`. Needs SQL Server 2016+ (`STRING_SPLIT`,
+   database compatibility level 130 or higher). Safe to re-run.
 4. Update the agent (`client-powershell/monitor.ps1`): queue file names are now UTC.
    An older agent keeps working; it can only misorder its queue in the hour the clock
    is turned back.
+
+Optional `.env` key: `FBL_WINDOW_GROUP_BY_PROGRAM` (default
+`msedge,chrome,firefox,brave,opera`) — programs that get one row per session with the
+latest title instead of one row per window title. Restart the service after a change.
 
 The DB login needs `UPDATE` on `dbo.WindowActivity`. Grouping rules: `docs/api.md`,
 *Window grouping*.

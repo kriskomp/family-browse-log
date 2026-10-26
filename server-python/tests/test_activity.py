@@ -6,7 +6,8 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.activity import (clamp_limit, clean_url, group_samples, local_iso, mark_active,
+from app.config import parse_program_list
+from app.activity import (clamp_limit, clean_url, group_key, group_samples, local_iso, mark_active,
                           merge_activity, merge_gap_sec, session_gap_sec)
 
 TZ = ZoneInfo("Europe/Warsaw")
@@ -244,6 +245,44 @@ class WindowSessions(unittest.TestCase):
     def test_none_and_empty_equal(self):
         touched, _, _ = self.run_([(T(20, 0), None, None), (T(20, 0, 30), "", "")])
         self.assertEqual(len(touched), 1)
+
+
+class BrowserGrouping(unittest.TestCase):
+    BR = frozenset({"msedge", "chrome"})
+
+    def test_program_list(self):
+        self.assertEqual(parse_program_list(" msedge, Chrome,,firefox "),
+                         frozenset({"msedge", "chrome", "firefox"}))
+        self.assertEqual(parse_program_list(""), frozenset())
+
+    def test_key(self):
+        self.assertEqual(group_key("msedge", "A", self.BR), ("msedge", None))
+        self.assertEqual(group_key("MSEdge", "B", self.BR), ("msedge", None))
+        self.assertEqual(group_key("notepad++", "n", self.BR), ("notepad++", "n"))
+        self.assertEqual(group_key(None, "", self.BR), (None, None))
+
+    def test_browser_tabs_one_row_latest_title(self):
+        samples = [(T(21, 0), "msedge", "CloudBeaver i jeszcze 4 strony"),
+                   (T(21, 0, 30), "msedge", "Claude i jeszcze 4 strony"),
+                   (T(21, 1), "notepad++", "n"),
+                   (T(21, 1, 30), "msedge", "Proxmox i jeszcze 5 stron")]
+        rows = {}
+        touched, _ = group_samples(None, None, rows, samples, 360, 30, self.BR)
+        self.assertEqual(len(touched), 2)
+        edge = rows[("msedge", None)]
+        self.assertEqual(edge["window"], "Proxmox i jeszcze 5 stron")
+        self.assertEqual(edge["secs"], 90)
+        self.assertEqual((edge["start"], edge["end"]), (T(21, 0), T(21, 1, 30)))
+
+    def test_other_programs_still_split_by_title(self):
+        samples = [(T(21, 0), "javaw", "Minecraft"), (T(21, 0, 30), "javaw", "Other game")]
+        touched, _ = group_samples(None, None, {}, samples, 360, 30, self.BR)
+        self.assertEqual(len(touched), 2)
+
+    def test_without_list_browser_splits(self):
+        samples = [(T(21, 0), "msedge", "A"), (T(21, 0, 30), "msedge", "B")]
+        touched, _ = group_samples(None, None, {}, samples, 360, 30)
+        self.assertEqual(len(touched), 2)
 
 
 class ActiveFlag(unittest.TestCase):

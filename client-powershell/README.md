@@ -47,8 +47,8 @@ folder anywhere — no hard-coded `C:\boot`.
    consecutive blocks on first run, then only the increment.
 3. **Windows**: it samples the active (foreground) window when the user is active
    (one sample per `window_sample_sec`, each with its own time). The agent only sends
-   samples; the **server** keeps one row per window per session, with from/to time and
-   total time in front (see `docs/api.md`, *Window grouping*). `session_min` in the
+   samples; the **server** keeps one row per window per session (one row per browser per
+   session, whatever the tab), with from/to time and total time in front (see `docs/api.md`, *Window grouping*). `session_min` in the
    payload is ignored.
    Set `window_all=1` in `cfg.Setting` to record every open window instead (v1 style).
 4. **Push**: every `push_interval_sec` it sends queued blocks via `POST /ingest`.

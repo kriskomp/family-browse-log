@@ -30,20 +30,30 @@ def session_gap_sec(sample_sec: int, idle_limit_sec: int) -> int:
     return max(merge_gap_sec(sample_sec), int(idle_limit_sec) + 2 * int(sample_sec))
 
 
+def group_key(program: str | None, title: str | None, by_program: frozenset) -> tuple:
+    """Row key inside a session. Programs in by_program (browsers) are one row whatever
+    the title (each tab changes it); others are one row per program + title."""
+    program = program or None
+    if program and program.lower() in by_program:
+        return (program.lower(), None)
+    return (program, title or None)
+
+
 def group_samples(last_end, session_start, session_rows: dict, samples: list,
-                  gap_sec: int, sample_sec: int):
+                  gap_sec: int, sample_sec: int, by_program: frozenset = frozenset()):
     """Fold window samples of ONE account into one row per window per session.
 
     last_end       newest EndTime of the account in the DB (None = no data)
     session_start  SessionStart of that newest row (None = unknown/old data)
-    session_rows   {(program, title): row} of the current session, row =
+    session_rows   {group_key: row} of the current session, row =
                    {'id', 'start', 'end', 'secs', 'session'} (naive local datetimes)
     samples        [(t, program, title)] sorted oldest first
 
     A session ends when no sample of ANY window arrives for more than gap_sec.
     Within a session, a window that comes back to the front updates its row
     (EndTime = last time in front, secs += sample_sec), so switching windows never
-    creates duplicate rows. Samples not newer than last_end are re-sends (the agent
+    creates duplicate rows. Programs in by_program (browsers) have one row per
+    session; its title is the latest one. Samples not newer than last_end are re-sends (the agent
     sends in order and only one agent records an account) and are skipped.
 
     Returns (touched rows in first-touch order, skipped count). Rows with id None
@@ -62,14 +72,16 @@ def group_samples(last_end, session_start, session_rows: dict, samples: list,
                 or (t - last_end).total_seconds() > gap_sec):
             session_start = t
             session_rows.clear()
-        row = session_rows.get((prog, title))
+        key = group_key(prog, title, by_program)
+        row = session_rows.get(key)
         if row is None:
             row = {"id": None, "start": t, "end": t, "secs": int(sample_sec),
                    "session": session_start, "program": prog, "window": title}
-            session_rows[(prog, title)] = row
+            session_rows[key] = row
         else:
             row["end"] = t
             row["secs"] += int(sample_sec)
+            row["window"] = title          # latest title (changes only for browsers)
         if id(row) not in seen:
             seen.add(id(row))
             touched.append(row)

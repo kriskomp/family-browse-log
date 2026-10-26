@@ -12,6 +12,11 @@ except Exception:
     pass
 
 
+def parse_program_list(value: str | None) -> frozenset[str]:
+    """'msedge, Chrome,,firefox' -> {'msedge','chrome','firefox'} (case-insensitive)."""
+    return frozenset(p.strip().lower() for p in (value or "").split(",") if p.strip())
+
+
 class Settings:
     """Runtime configuration for the service itself (NOT the per-agent settings,
     which live in the cfg.Setting table)."""
@@ -34,6 +39,12 @@ class Settings:
         # --- read API limits (items per /activity call) ---
         self.activity_default_limit: int = int(os.getenv("FBL_ACTIVITY_DEFAULT_LIMIT", "20"))
         self.activity_max_limit: int = int(os.getenv("FBL_ACTIVITY_MAX_LIMIT", "200"))
+
+        # --- window activity: programs grouped by program only (title = latest) ---
+        # Browsers change their window title with every tab; the pages themselves are in
+        # BrowsingHistory, so one row per browser per session is enough.
+        self.window_group_by_program: frozenset[str] = parse_program_list(
+            os.getenv("FBL_WINDOW_GROUP_BY_PROGRAM", "msedge,chrome,firefox,brave,opera"))
 
         # --- timezone used to derive the calendar Day from epoch timestamps ---
         self.local_tz: str = os.getenv("FBL_LOCAL_TZ", "Europe/Warsaw")

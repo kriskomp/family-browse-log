@@ -1,31 +1,33 @@
 /* 2026.10.26.5 - window activity per session: ONE-OFF migration of existing data.
 
-   STEP 1 - run schema.sql (or at least its "Upgrade from 2026.10.25.4" part) first,
-            so the columns EndTime, SessionStart and ActiveSeconds exist.
-   STEP 2 - run this script against database [monitor].
+   STEP 1 - the columns EndTime, SessionStart, ActiveSeconds must exist
+            (schema.sql, part "Upgrade from 2026.10.25.4").
+   STEP 2 - run this script against database [monitor] AS ONE BATCH
+            (CloudBeaver: select all, Ctrl+Enter).
 
-   What it does with rows that have no SessionStart yet (written before this version,
-   one row per 30 s sample, or by an early test build of this branch):
-   1. splits each account's rows into sessions: a new session starts after a pause
-      longer than @gap seconds with no row at all (PC off, asleep, logged off),
-   2. merges, inside each session, all rows of the same Program + WindowTitle into ONE
-      row - also when the user switched away and came back:
-        EventTime     = first time in front, EndTime = last time in front,
-        ActiveSeconds = total time in front, SessionMinutes = ActiveSeconds / 60,
-        SessionStart  = first row of the session,
-   3. deletes the merged-away rows.
+   Phase 1 - rows without SessionStart (one row per 30 s sample, or an early test build):
+             each account's rows are split into sessions; a new session starts after a
+             pause longer than @gap seconds with no row at all (PC off, asleep, logged off).
+   Phase 2 - ALL rows: inside each session, rows with the same key are merged into ONE:
+               browsers (@browsers)  -> key = Program            (title = the latest one)
+               other programs        -> key = Program + WindowTitle
+             EventTime = first time in front, EndTime = last time in front,
+             ActiveSeconds = total time in front, SessionMinutes = ActiveSeconds / 60.
+             Merged-away rows are deleted.
 
-   Rows that already have SessionStart are not touched, so re-running is harmless.
-   One transaction. Preview first: @apply = 0 (default) only SHOWS the effect. */
+   Re-running is harmless (already merged rows form groups of one). One transaction.
+   Preview first: @apply = 0 (default) only SHOWS the effect and rolls back. */
 
-DECLARE @apply  BIT = 0;     -- 0 = preview only, 1 = apply
-DECLARE @sample INT = 30;    -- window_sample_sec
-DECLARE @gap    INT = 360;   -- session gap = idle_limit_sec + 2 * window_sample_sec
+DECLARE @apply    BIT = 0;      -- 0 = preview only, 1 = apply
+DECLARE @sample   INT = 30;     -- window_sample_sec
+DECLARE @gap      INT = 360;    -- session gap = idle_limit_sec + 2 * window_sample_sec
+DECLARE @browsers NVARCHAR(400) = N'msedge,chrome,firefox,brave,opera';  -- = FBL_WINDOW_GROUP_BY_PROGRAM
 
 BEGIN TRAN;
 
+/* ---- phase 1: sessions for rows that have none ---------------------------------- */
 ;WITH b AS (
-    SELECT Id, Computer, UserAccount, Program, WindowTitle, EventTime,
+    SELECT Id, Computer, UserAccount, EventTime,
            ISNULL(EndTime, EventTime) AS E,
            CASE WHEN ActiveSeconds > 0 THEN ActiveSeconds
                 WHEN EndTime IS NULL   THEN @sample
@@ -48,20 +50,48 @@ BEGIN TRAN;
                             ROWS UNBOUNDED PRECEDING) AS Sess
       FROM f
 )
-SELECT Id, Computer, UserAccount, Program, WindowTitle, EventTime, E, Secs, Sess,
+SELECT Id, E, Secs,
        MIN(EventTime) OVER (PARTITION BY Computer, UserAccount, Sess) AS SessStart
-  INTO #r FROM s;
+  INTO #p1 FROM s;
 
-SELECT Computer, UserAccount, Sess, Program, WindowTitle,
-       MIN(Id) AS KeepId, MIN(EventTime) AS FirstTime, MAX(E) AS LastTime,
-       SUM(Secs) AS Secs, MIN(SessStart) AS SessStart, COUNT(*) AS OldRows
+UPDATE w
+   SET SessionStart = p.SessStart, EndTime = p.E,
+       ActiveSeconds = p.Secs, SessionMinutes = p.Secs / 60
+  FROM dbo.WindowActivity w
+  JOIN #p1 p ON p.Id = w.Id;
+
+/* ---- phase 2: one row per key inside each session ------------------------------- */
+SELECT w.Id, w.Computer, w.UserAccount, w.SessionStart, w.Program, w.WindowTitle,
+       w.EventTime, ISNULL(w.EndTime, w.EventTime) AS E, w.ActiveSeconds,
+       CASE WHEN b.value IS NOT NULL THEN NULL ELSE w.WindowTitle END AS TitleKey
+  INTO #k
+  FROM dbo.WindowActivity w
+  LEFT JOIN (SELECT DISTINCT LOWER(LTRIM(RTRIM(value))) AS value
+               FROM STRING_SPLIT(@browsers, ',')) b
+         ON b.value = LOWER(w.Program);
+
+SELECT k.*,
+       ROW_NUMBER() OVER (PARTITION BY Computer, UserAccount, SessionStart,
+                                       LOWER(Program), TitleKey
+                          ORDER BY E DESC, Id DESC) AS Rn,
+       DENSE_RANK() OVER (ORDER BY Computer, UserAccount, SessionStart,
+                                   LOWER(Program), TitleKey) AS Grp
+  INTO #r FROM #k k;
+
+SELECT Grp,
+       MIN(Id)            AS KeepId,
+       MIN(EventTime)     AS FirstTime,
+       MAX(E)             AS LastTime,
+       SUM(ActiveSeconds) AS Secs,
+       MAX(CASE WHEN Rn = 1 THEN WindowTitle END) AS LastTitle,
+       COUNT(*)           AS OldRows
   INTO #g
   FROM #r
- GROUP BY Computer, UserAccount, Sess, Program, WindowTitle;
+ GROUP BY Grp;
 
 SELECT 'preview' AS what,
-       (SELECT COUNT(DISTINCT CONCAT(Computer, N'|', UserAccount, N'|', Sess)) FROM #g) AS sessions,
-       COUNT(*) AS rows_after, SUM(OldRows) AS rows_before,
+       (SELECT COUNT(*) FROM #p1) AS rows_given_session,
+       SUM(OldRows) AS rows_before, COUNT(*) AS rows_after,
        SUM(OldRows) - COUNT(*) AS rows_to_delete
   FROM #g;
 
@@ -70,11 +100,12 @@ BEGIN
     UPDATE w
        SET EventTime      = g.FirstTime,
            EndTime        = g.LastTime,
-           SessionStart   = g.SessStart,
            ActiveSeconds  = g.Secs,
-           SessionMinutes = g.Secs / 60
+           SessionMinutes = g.Secs / 60,
+           WindowTitle    = g.LastTitle
       FROM dbo.WindowActivity w
-      JOIN #g g ON g.KeepId = w.Id;
+      JOIN #g g ON g.KeepId = w.Id
+     WHERE g.OldRows > 1;
 
     DELETE w
       FROM dbo.WindowActivity w
@@ -90,5 +121,7 @@ BEGIN
     SELECT 'nothing changed (preview). Set @apply = 1 to execute.' AS what;
 END
 
+DROP TABLE IF EXISTS #p1;
+DROP TABLE IF EXISTS #k;
 DROP TABLE IF EXISTS #r;
 DROP TABLE IF EXISTS #g;

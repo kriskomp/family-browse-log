@@ -146,18 +146,26 @@ For a single `/ingest` call, inside one DB transaction:
 ### Window grouping
 
 The agent sends one sample every `window_sample_sec` (30 s), each with its own time
-(also when it waited in the offline queue). The server keeps **one row per window
-(`Program` + `WindowTitle`) per session** of the account:
+(also when it waited in the offline queue). The server keeps **one row per window per
+session** of the account. A window is:
+
+- **a browser** (`FBL_WINDOW_GROUP_BY_PROGRAM`, default `msedge,chrome,firefox,brave,opera`,
+  case-insensitive): the **program alone**. Its title changes with every tab, new page or
+  tab count ("… i jeszcze 4 strony"), so it would split constantly; the row keeps the
+  **latest** title. Which pages were visited is in `dbo.BrowsingHistory`.
+- **any other program**: `Program` + `WindowTitle` (so different games, documents or
+  Store apps hosted by one process, e.g. `ApplicationFrameHost`, stay apart).
 
 | Column | Meaning |
 |---|---|
 | `SessionStart` | first sample of the session; all rows of one session share it |
 | `EventTime` | first time the window was in front in that session (**from**) |
 | `EndTime` | last time it was in front (**to**) |
+| `WindowTitle` | for browsers the latest title, otherwise the window title |
 | `ActiveSeconds` | total time in front: `window_sample_sec` per sample |
 | `SessionMinutes` | `ActiveSeconds / 60` — grows while the window is used |
 
-- **Switching windows never adds duplicate rows**: coming back to a window in the same
+- **Switching windows or browser tabs never adds duplicate rows**: coming back to a window in the same
   session updates its row (`EndTime`, `ActiveSeconds`). Two windows used alternately for
   10 minutes get about 5 minutes each, while both show `from`/`to` spanning the 10 minutes.
 - **A session ends** when the account sends no sample of any window for longer than
