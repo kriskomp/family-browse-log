@@ -348,8 +348,11 @@ def build_usage(rows: list[dict], accounts: list[tuple], person_rows: list[dict]
         if prog.casefold() in host_programs and (r.get("window") or "").strip():
             host, prog = prog, r["window"].strip()
         key = ((host or "").casefold(), prog.casefold())
-        name, _h, total = p["programs"].get(key, (prog, host, 0))
-        p["programs"][key] = (name, host, total + sec)
+        # spelling shown = the one of the biggest contributing row (stable, not row order)
+        name, h0, total, best = p["programs"].get(key, (prog, host, 0, -1))
+        if sec > best:
+            name, h0, best = prog, host, sec
+        p["programs"][key] = (name, h0, total + sec, best)
         p["per_day"][r["day"]] += sec
 
     out = []
@@ -368,8 +371,8 @@ def build_usage(rows: list[dict], accounts: list[tuple], person_rows: list[dict]
             "computers": [{"computer": c, **duration(s)} for c, s in
                           sorted(p["computers"].items(), key=lambda x: (-x[1], x[0].casefold()))],
             "programs": [{"program": n, **({"host": h} if h else {}), **duration(s)}
-                         for n, h, s in shown],
-            "programs_other": ({"count": len(rest), **duration(sum(s for _, _, s in rest))}
+                         for n, h, s, _b in shown],
+            "programs_other": ({"count": len(rest), **duration(sum(x[2] for x in rest))}
                                if rest else None),
             "per_day": per_day,
             "active_days": active,
