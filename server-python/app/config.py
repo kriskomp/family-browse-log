@@ -46,6 +46,12 @@ class Settings:
         self.window_group_by_program: frozenset[str] = parse_program_list(
             os.getenv("FBL_WINDOW_GROUP_BY_PROGRAM", "msedge,chrome,firefox,brave,opera"))
 
+        # --- usage: host processes shown by window title instead of by program ---
+        # Microsoft Store apps all run inside ApplicationFrameHost, so "program" alone
+        # would lump Solitaire, the media player, ... into one entry.
+        self.usage_host_programs: frozenset[str] = parse_program_list(
+            os.getenv("FBL_USAGE_HOST_PROGRAMS", "ApplicationFrameHost"))
+
         # --- timezone used to derive the calendar Day from epoch timestamps ---
         self.local_tz: str = os.getenv("FBL_LOCAL_TZ", "Europe/Warsaw")
 

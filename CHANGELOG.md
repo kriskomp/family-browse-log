@@ -12,6 +12,8 @@ Persons and time in front of the computer (server side, groundwork for the Home 
 - `GET /persons`: people and their accounts. Table `cfg.Person` links the logins of one person across PCs (`UserName` without the computer part, optional `Computer`, `Excluded` to hide a person); an account without a row is its own person, so nothing has to be configured. Edited with `server-python/sql/persons.sql` (a template with example names).
 - `person` in `GET /users` and in every `GET /activity` item, and a `person=` filter on `GET /activity`.
 
+- `GET /usage` lists host processes by window title: Microsoft Store apps all run in `ApplicationFrameHost`, so they are named by the app (`Solitaire & Casual Games`) with `"host"` set, instead of lumped together. `.env` key `FBL_USAGE_HOST_PROGRAMS` (default `ApplicationFrameHost`, comma-separated, empty = none).
+
 ### Fixed
 - `docs/api.md`: a stale copy of the old window-grouping text left behind by 2026.10.26.5 is removed.
 

@@ -282,7 +282,9 @@ Day boundaries are local time (`FBL_LOCAL_TZ`).
      "total": {"seconds": 5100, "text": "1 h 25 min"},
      "computers": [{"computer": "LEGION", "seconds": 3600, "text": "1 h"},
                    {"computer": "LENOVO", "seconds": 1500, "text": "25 min"}],
-     "programs": [{"program": "msedge", "seconds": 4500, "text": "1 h 15 min"}],
+     "programs": [{"program": "msedge", "seconds": 4500, "text": "1 h 15 min"},
+                  {"program": "Solitaire & Casual Games", "host": "ApplicationFrameHost",
+                   "seconds": 600, "text": "10 min"}],
      "programs_other": {"count": 1, "seconds": 600, "text": "10 min"},
      "per_day": [{"date": "2026-10-28", "seconds": 5100, "text": "1 h 25 min"}],
      "active_days": 1,
@@ -296,6 +298,11 @@ Day boundaries are local time (`FBL_LOCAL_TZ`).
   `text`: `1 h 15 min`, `2 h`, `45 min`, `< 1 min` (never `75 min`).
 - A known person with no time in the range is still listed, with zeros, so a dashboard
   shows `0 min` instead of a missing value.
+- **Host processes** (`FBL_USAGE_HOST_PROGRAMS`, default `ApplicationFrameHost`, which runs
+  every Microsoft Store app) are listed by **window title**, i.e. the app name: `Solitaire &
+  Casual Games`, `Odtwarzacz multimedialny`. Such an entry has `"host": "ApplicationFrameHost"`.
+  A host row with an empty title stays under the process name. Other programs, browsers
+  included, are never split by title. Nothing changes in the stored data.
 - Programs are merged case-insensitively. `per_day` lists every day of the range
   (zeros included). `average.per_active_day` divides by the days with any time,
   `average.per_day` by all days of the range.

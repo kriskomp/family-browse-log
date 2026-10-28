@@ -311,11 +311,14 @@ def resolve_range(day: str | None, start: str | None, end: str | None,
 def build_usage(rows: list[dict], accounts: list[tuple], person_rows: list[dict],
                 start: date, end: date, programs_limit: int = 10,
                 include_excluded: bool = False, person_ids: set | None = None,
-                computer: str | None = None) -> list[dict]:
+                computer: str | None = None,
+                host_programs: frozenset = frozenset()) -> list[dict]:
     """GET /usage: time in front per person, split by computer, program and day.
 
-    rows     [{'computer','user','program','day': date,'seconds'}] already limited to
-             the range (a window row counts on the day of its last activity)
+    rows     [{'computer','user','program','window','day': date,'seconds'}] already
+             limited to the range (a window row counts on the day of its last activity)
+    host_programs  lower-case process names that only host other apps (Store apps run in
+             ApplicationFrameHost): listed by window title, with 'host' set
     accounts [(computer, account, ...)] every known account, so a person with no time
              in the range still appears with zeros
     programs_limit  top N programs, the rest summed in 'programs_other' (0 = all)
@@ -341,16 +344,19 @@ def build_usage(rows: list[dict], accounts: list[tuple], person_rows: list[dict]
         sec = int(r["seconds"] or 0)
         p["computers"][r["computer"]] = p["computers"].get(r["computer"], 0) + sec
         prog = r["program"] or "(unknown)"
-        key = prog.casefold()
-        name, total = p["programs"].get(key, (prog, 0))
-        p["programs"][key] = (name, total + sec)
+        host = None
+        if prog.casefold() in host_programs and (r.get("window") or "").strip():
+            host, prog = prog, r["window"].strip()
+        key = ((host or "").casefold(), prog.casefold())
+        name, _h, total = p["programs"].get(key, (prog, host, 0))
+        p["programs"][key] = (name, host, total + sec)
         p["per_day"][r["day"]] += sec
 
     out = []
     for p in people.values():
         if (p["excluded"] and not include_excluded) or (person_ids and p["id"] not in person_ids):
             continue
-        progs = sorted(p["programs"].values(), key=lambda x: (-x[1], x[0].casefold()))
+        progs = sorted(p["programs"].values(), key=lambda x: (-x[2], x[0].casefold()))
         shown = progs if programs_limit == 0 else progs[:programs_limit]
         rest = [] if programs_limit == 0 else progs[programs_limit:]
         per_day = [{"date": d.isoformat(), **duration(p["per_day"][d])} for d in days]
@@ -361,8 +367,9 @@ def build_usage(rows: list[dict], accounts: list[tuple], person_rows: list[dict]
             "total": duration(total),
             "computers": [{"computer": c, **duration(s)} for c, s in
                           sorted(p["computers"].items(), key=lambda x: (-x[1], x[0].casefold()))],
-            "programs": [{"program": n, **duration(s)} for n, s in shown],
-            "programs_other": ({"count": len(rest), **duration(sum(s for _, s in rest))}
+            "programs": [{"program": n, **({"host": h} if h else {}), **duration(s)}
+                         for n, h, s in shown],
+            "programs_other": ({"count": len(rest), **duration(sum(s for _, _, s in rest))}
                                if rest else None),
             "per_day": per_day,
             "active_days": active,

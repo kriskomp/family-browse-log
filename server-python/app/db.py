@@ -202,7 +202,8 @@ def fetch_persons(cur) -> list[dict]:
 
 
 def fetch_usage_rows(cur, start: date, end: date, computer: str | None) -> list[dict]:
-    """Seconds in front per (computer, account, program, day) for start..end inclusive.
+    """Seconds in front per (computer, account, program, window title, day) for
+    start..end inclusive (the title lets /usage name host-process apps).
     A window row belongs to the day of its last activity (EndTime)."""
     params: list = [datetime(start.year, start.month, start.day),
                     datetime(end.year, end.month, end.day) + timedelta(days=1)]
@@ -212,14 +213,15 @@ def fetch_usage_rows(cur, start: date, end: date, computer: str | None) -> list[
         params.append(computer)
     cur.execute(
         f"""
-        SELECT Computer, UserAccount, Program,
+        SELECT Computer, UserAccount, Program, WindowTitle,
                CAST(ISNULL(EndTime, EventTime) AS DATE) AS Day,
                SUM(ActiveSeconds)
           FROM dbo.WindowActivity
          WHERE ISNULL(EndTime, EventTime) >= %s AND ISNULL(EndTime, EventTime) < %s{extra}
-         GROUP BY Computer, UserAccount, Program, CAST(ISNULL(EndTime, EventTime) AS DATE)
+         GROUP BY Computer, UserAccount, Program, WindowTitle,
+                  CAST(ISNULL(EndTime, EventTime) AS DATE)
         """,
         params,
     )
-    return [{"computer": r[0], "user": r[1], "program": r[2], "day": r[3],
-             "seconds": int(r[4] or 0)} for r in cur.fetchall()]
+    return [{"computer": r[0], "user": r[1], "program": r[2], "window": r[3], "day": r[4],
+             "seconds": int(r[5] or 0)} for r in cur.fetchall()]

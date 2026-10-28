@@ -175,7 +175,8 @@ def get_usage(
 
     ids = {slugify(p) for p in person} or None
     result = build_usage(rows, accounts, person_rows, start, end, programs,
-                         include_excluded, ids, computer)
+                         include_excluded, ids, computer,
+                         get_settings().usage_host_programs)
     return UsageResponse(
         generated_at=now.isoformat(timespec="seconds"),
         period={"from": start.isoformat(), "to": end.isoformat(),

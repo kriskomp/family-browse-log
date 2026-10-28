@@ -449,6 +449,40 @@ class Usage(unittest.TestCase):
         self.assertEqual([c["computer"] for c in on_pc["computers"]], ["LENOVO"])
 
 
+class UsageHostPrograms(unittest.TestCase):
+    ACC = [("PC", "PC\\anna", None)]
+    HOSTS = frozenset({"applicationframehost"})
+
+    def rows(self):
+        return [U("PC", "PC\\anna", "ApplicationFrameHost", D2, 600) | {"window": "Pasjans"},
+                U("PC", "PC\\anna", "applicationframehost", D2, 300) | {"window": "Pasjans"},
+                U("PC", "PC\\anna", "ApplicationFrameHost", D2, 120) | {"window": "Odtwarzacz"},
+                U("PC", "PC\\anna", "ApplicationFrameHost", D2, 60) | {"window": ""},
+                U("PC", "PC\\anna", "msedge", D2, 200) | {"window": "Strona"}]
+
+    def test_host_apps_listed_by_title(self):
+        anna = build_usage(self.rows(), self.ACC, [], D2, D2, host_programs=self.HOSTS)[0]
+        self.assertEqual([(p["program"], p.get("host"), p["seconds"]) for p in anna["programs"]],
+                         [("Pasjans", "ApplicationFrameHost", 900),
+                          ("msedge", None, 200),
+                          ("Odtwarzacz", "ApplicationFrameHost", 120),
+                          ("ApplicationFrameHost", None, 60)])   # no title: stays the host
+        self.assertEqual(anna["total"]["seconds"], 1280)
+
+    def test_without_hosts_lumped_by_program(self):
+        anna = build_usage(self.rows(), self.ACC, [], D2, D2)[0]
+        self.assertEqual([(p["program"], p["seconds"]) for p in anna["programs"]],
+                         [("ApplicationFrameHost", 1080), ("msedge", 200)])
+        self.assertNotIn("host", anna["programs"][0])
+
+    def test_browser_titles_never_split_programs(self):
+        rows = [U("PC", "PC\\anna", "msedge", D2, 60) | {"window": "A"},
+                U("PC", "PC\\anna", "msedge", D2, 60) | {"window": "B"}]
+        anna = build_usage(rows, self.ACC, [], D2, D2, host_programs=self.HOSTS)[0]
+        self.assertEqual([(p["program"], p["seconds"]) for p in anna["programs"]],
+                         [("msedge", 120)])
+
+
 class ActiveFlag(unittest.TestCase):
     NOW = datetime(2026, 10, 26, 19, 0, 0)
 

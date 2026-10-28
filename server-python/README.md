@@ -61,7 +61,9 @@ GRANT SELECT ON cfg.Person          TO [<login>];   -- since 2026.10.28.6 (perso
    read-API login (see above).
 2. Pull the code and restart the service. Until `cfg.Person` exists the API still works
    (every account is its own person), so the order is not critical.
-3. Link accounts with `sql/persons.sql` (it ships with **example** names - put your own
+3. Optional `.env` key `FBL_USAGE_HOST_PROGRAMS` (default `ApplicationFrameHost`): host
+   processes that `GET /usage` names by window title instead of by program.
+4. Link accounts with `sql/persons.sql` (it ships with **example** names - put your own
    in; the file is a template, do not commit real names to a public repo). Changes apply
    at once, no restart.
 
