@@ -49,6 +49,7 @@ class IngestResponse(BaseModel):
 class UserEntry(BaseModel):
     computer: str
     user: str
+    person: str
     last_seen: str | None
     excluded: bool
 
@@ -68,3 +69,14 @@ class ActivityResponse(BaseModel):
     limit: int
     items: list[dict]
     summary: ActivitySummary
+
+
+class PersonsResponse(BaseModel):
+    persons: list[dict]
+
+
+class UsageResponse(BaseModel):
+    generated_at: str
+    period: dict
+    programs_limit: int
+    persons: list[dict]

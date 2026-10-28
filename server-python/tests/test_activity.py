@@ -3,11 +3,13 @@
 Run from server-python/:  python3 -m unittest discover -s tests -v
 """
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from app.config import parse_program_list
-from app.activity import (clamp_limit, clean_url, group_key, group_samples, local_iso, mark_active,
+from app.activity import (build_persons, build_usage, format_duration, resolve_person,
+                          resolve_range, slugify, user_part,
+                          clamp_limit, clean_url, group_key, group_samples, local_iso, mark_active,
                           merge_activity, merge_gap_sec, session_gap_sec)
 
 TZ = ZoneInfo("Europe/Warsaw")
@@ -58,11 +60,11 @@ class LocalIso(unittest.TestCase):
 
 
 class MergeActivity(unittest.TestCase):
-    def web(self, t, url="https://a.pl/x?y=1", title="T", visits=1, user="LEGION\\vvojc"):
+    def web(self, t, url="https://a.pl/x?y=1", title="T", visits=1, user="LEGION\\anna"):
         return {"time": t, "url": url, "title": title, "visits": visits,
                 "user": user, "computer": "LEGION"}
 
-    def win(self, t, program="msedge", window="W", user="LEGION\\vvojc"):
+    def win(self, t, program="msedge", window="W", user="LEGION\\anna"):
         return {"time": t, "program": program, "window": window,
                 "user": user, "computer": "LEGION"}
 
@@ -91,7 +93,7 @@ class MergeActivity(unittest.TestCase):
         items, _ = merge_activity([self.web(datetime(2026, 10, 20, 10, 0), title=None, visits=3)],
                                   [], TZ, 5)
         self.assertEqual(items[0], {"type": "web", "time": "2026-10-20T10:00:00+02:00",
-                                    "user": "LEGION\\vvojc", "computer": "LEGION",
+                                    "user": "LEGION\\anna", "computer": "LEGION",
                                     "url": "https://a.pl/x", "title": "", "visits": 3})
 
     def test_window_item_fields(self):
@@ -283,6 +285,202 @@ class BrowserGrouping(unittest.TestCase):
         samples = [(T(21, 0), "msedge", "A"), (T(21, 0, 30), "msedge", "B")]
         touched, _ = group_samples(None, None, {}, samples, 360, 30)
         self.assertEqual(len(touched), 2)
+
+
+PEOPLE = [
+    {"person": "Anna", "computer": None, "username": "anna", "excluded": False},
+    {"person": "Anna", "computer": None, "username": "ania", "excluded": False},
+    {"person": "Rodzic", "computer": None, "username": "parent", "excluded": True},
+    {"person": "Rodzic", "computer": None, "username": "p2", "excluded": True},
+    {"person": "Ola", "computer": "PC2", "username": "x", "excluded": False},
+    {"person": "Ala", "computer": None, "username": "x", "excluded": False},
+]
+
+
+class Persons(unittest.TestCase):
+    def test_slug_and_user_part(self):
+        self.assertEqual(slugify("\u0141ukasz"), "lukasz")
+        self.assertEqual(slugify("\u0141ukasz \u017b\u00f3\u0142w"), "lukasz-zolw")
+        self.assertEqual(slugify("   "), "unknown")
+        self.assertEqual(user_part("LEGION\\anna"), "anna")
+        self.assertEqual(user_part("anna"), "anna")
+
+    def test_links_logins_across_pcs_and_case(self):
+        a = resolve_person("LEGION", "LEGION\\Anna", PEOPLE)
+        b = resolve_person("LENOVO", "LENOVO\\ania", PEOPLE)
+        self.assertEqual((a["id"], a["name"]), ("anna", "Anna"))
+        self.assertEqual(b["id"], "anna")
+
+    def test_computer_specific_row_wins(self):
+        self.assertEqual(resolve_person("PC2", "PC2\\x", PEOPLE)["name"], "Ola")
+        self.assertEqual(resolve_person("PC1", "PC1\\x", PEOPLE)["name"], "Ala")
+
+    def test_unmapped_is_its_own_person(self):
+        who = resolve_person("PC1", "PC1\\Nowy", PEOPLE)
+        self.assertEqual((who["id"], who["name"], who["excluded"]), ("nowy", "Nowy", False))
+
+    def test_excluded_when_any_row_is(self):
+        self.assertTrue(resolve_person("PC1", "PC1\\parent", PEOPLE)["excluded"])
+        self.assertTrue(resolve_person("PC1", "PC1\\p2", PEOPLE)["excluded"])
+        self.assertEqual(resolve_person("PC1", "PC1\\p2", PEOPLE)["id"], "rodzic")
+
+    def test_build_persons(self):
+        accounts = [("LEGION", "LEGION\\anna", datetime(2026, 10, 28, 10, 0)),
+                    ("LENOVO", "LENOVO\\ania", datetime(2026, 10, 28, 12, 0)),
+                    ("LENOVO", "LENOVO\\parent", None)]
+        out = build_persons(accounts, PEOPLE, lambda u, c: u == "LEGION\\anna", TZ)
+        self.assertEqual([p["id"] for p in out], ["anna"])          # parent hidden
+        anna = out[0]
+        self.assertEqual(len(anna["accounts"]), 2)
+        self.assertEqual(anna["last_seen"], "2026-10-28T12:00:00+01:00")
+        self.assertEqual([a["recording_excluded"] for a in anna["accounts"]], [True, False])
+        shown = build_persons(accounts, PEOPLE, lambda u, c: False, TZ, include_excluded=True)
+        self.assertEqual([p["id"] for p in shown], ["anna", "rodzic"])
+
+    def test_person_in_activity_items(self):
+        win = [{"start": datetime(2026, 10, 28, 9), "time": datetime(2026, 10, 28, 10),
+                "minutes": 1, "program": "p", "window": "w", "user": "LENOVO\\ania",
+                "computer": "LENOVO"}]
+        items, _ = merge_activity([], win, TZ, 5, person_of=lambda c, u: resolve_person(c, u, PEOPLE))
+        self.assertEqual(items[0]["person"], "Anna")
+
+
+class Durations(unittest.TestCase):
+    def test_format(self):
+        for sec, text in [(0, "0 min"), (30, "< 1 min"), (60, "1 min"), (2700, "45 min"),
+                          (4500, "1 h 15 min"), (7200, "2 h"), (93600, "26 h")]:
+            self.assertEqual(format_duration(sec), text, sec)
+
+    def test_range(self):
+        today = date(2026, 10, 28)
+        self.assertEqual(resolve_range(None, None, None, today), (today, today))
+        self.assertEqual(resolve_range("2026-10-01", None, None, today),
+                         (date(2026, 10, 1), date(2026, 10, 1)))
+        self.assertEqual(resolve_range(None, "2026-10-01", "2026-10-07", today),
+                         (date(2026, 10, 1), date(2026, 10, 7)))
+        self.assertEqual(resolve_range(None, "2026-10-20", None, today),
+                         (date(2026, 10, 20), today))
+
+    def test_range_errors(self):
+        today = date(2026, 10, 28)
+        for args in [("2026-10-01", "2026-10-02", None), (None, "2026-10-09", "2026-10-01"),
+                     ("nonsense", None, None), (None, "2025-01-01", "2026-10-28")]:
+            with self.assertRaises(ValueError):
+                resolve_range(*args, today)
+
+
+D1, D2 = date(2026, 10, 27), date(2026, 10, 28)
+
+
+def U(comp, user, prog, day, sec):
+    return {"computer": comp, "user": user, "program": prog, "day": day, "seconds": sec}
+
+
+class Usage(unittest.TestCase):
+    ACC = [("LEGION", "LEGION\\anna", None), ("LENOVO", "LENOVO\\ania", None),
+           ("LENOVO", "LENOVO\\parent", None), ("LENOVO", "LENOVO\\idle", None)]
+    ROWS = [U("LEGION", "LEGION\\anna", "msedge", D2, 3600),
+            U("LENOVO", "LENOVO\\ania", "MSEdge", D2, 900),
+            U("LENOVO", "LENOVO\\ania", "javaw", D2, 600),
+            U("LENOVO", "LENOVO\\ania", "notepad++", D1, 300),
+            U("LENOVO", "LENOVO\\parent", "msedge", D2, 99999)]
+
+    def usage(self, **kw):
+        kw.setdefault("programs_limit", 10)
+        return build_usage(self.ROWS, self.ACC, PEOPLE, D2, D2, **kw)
+
+    def by_id(self, out):
+        return {p["id"]: p for p in out}
+
+    def test_one_person_over_two_pcs(self):
+        anna = self.by_id(self.usage())["anna"]
+        self.assertEqual(anna["total"], {"seconds": 5100, "text": "1 h 25 min"})
+        self.assertEqual([(c["computer"], c["seconds"]) for c in anna["computers"]],
+                         [("LEGION", 3600), ("LENOVO", 1500)])
+        self.assertEqual(anna["programs"][0]["program"], "msedge")      # case-insensitive merge
+        self.assertEqual(anna["programs"][0]["seconds"], 4500)
+        self.assertEqual(anna["per_day"], [{"date": "2026-10-28", "seconds": 5100,
+                                            "text": "1 h 25 min"}])
+
+    def test_excluded_hidden_and_shown(self):
+        self.assertNotIn("rodzic", self.by_id(self.usage()))
+        shown = self.by_id(self.usage(include_excluded=True))
+        self.assertEqual(shown["rodzic"]["total"]["seconds"], 99999)
+
+    def test_person_without_time_has_zeros(self):
+        idle = self.by_id(self.usage())["idle"]
+        self.assertEqual(idle["total"], {"seconds": 0, "text": "0 min"})
+        self.assertEqual(idle["programs"], [])
+        self.assertIsNone(idle["programs_other"])
+
+    def test_top_n_and_other(self):
+        anna = self.by_id(self.usage(programs_limit=1))["anna"]
+        self.assertEqual([p["program"] for p in anna["programs"]], ["msedge"])
+        self.assertEqual(anna["programs_other"], {"count": 1, "seconds": 600, "text": "10 min"})
+        all_ = self.by_id(self.usage(programs_limit=0))["anna"]
+        self.assertEqual(len(all_["programs"]), 2)
+        self.assertIsNone(all_["programs_other"])
+
+    def test_range_days_and_averages(self):
+        out = self.by_id(build_usage(self.ROWS, self.ACC, PEOPLE, D1, D2))
+        anna = out["anna"]
+        self.assertEqual([d["date"] for d in anna["per_day"]], ["2026-10-27", "2026-10-28"])
+        self.assertEqual(anna["per_day"][0]["seconds"], 300)
+        self.assertEqual(anna["active_days"], 2)
+        self.assertEqual(anna["total"]["seconds"], 5400)
+        self.assertEqual(anna["average"]["per_active_day"]["seconds"], 2700)
+        self.assertEqual(anna["average"]["per_day"]["seconds"], 2700)
+        idle = out["idle"]
+        self.assertEqual(idle["active_days"], 0)
+        self.assertEqual(idle["average"]["per_active_day"]["seconds"], 0)
+
+    def test_average_over_calendar_days(self):
+        d3 = date(2026, 10, 29)
+        out = self.by_id(build_usage(self.ROWS, self.ACC, PEOPLE, D2, d3))
+        self.assertEqual(out["anna"]["active_days"], 1)
+        self.assertEqual(out["anna"]["average"]["per_active_day"]["seconds"], 5100)
+        self.assertEqual(out["anna"]["average"]["per_day"]["seconds"], 2550)
+
+    def test_filters(self):
+        only = self.usage(person_ids={"anna"})
+        self.assertEqual([p["id"] for p in only], ["anna"])
+        on_pc = self.by_id(self.usage(computer="LENOVO"))["anna"]
+        self.assertEqual(on_pc["total"]["seconds"], 1500)
+        self.assertEqual([c["computer"] for c in on_pc["computers"]], ["LENOVO"])
+
+
+class UsageHostPrograms(unittest.TestCase):
+    ACC = [("PC", "PC\\anna", None)]
+    HOSTS = frozenset({"applicationframehost"})
+
+    def rows(self):
+        return [U("PC", "PC\\anna", "ApplicationFrameHost", D2, 600) | {"window": "Pasjans"},
+                U("PC", "PC\\anna", "applicationframehost", D2, 300) | {"window": "Pasjans"},
+                U("PC", "PC\\anna", "ApplicationFrameHost", D2, 120) | {"window": "Odtwarzacz"},
+                U("PC", "PC\\anna", "ApplicationFrameHost", D2, 60) | {"window": ""},
+                U("PC", "PC\\anna", "msedge", D2, 200) | {"window": "Strona"}]
+
+    def test_host_apps_listed_by_title(self):
+        anna = build_usage(self.rows(), self.ACC, [], D2, D2, host_programs=self.HOSTS)[0]
+        self.assertEqual([(p["program"], p.get("host"), p["seconds"]) for p in anna["programs"]],
+                         [("Pasjans", "ApplicationFrameHost", 900),
+                          ("msedge", None, 200),
+                          ("Odtwarzacz", "ApplicationFrameHost", 120),
+                          ("ApplicationFrameHost", None, 60)])   # no title: stays the host
+        self.assertEqual(anna["total"]["seconds"], 1280)
+
+    def test_without_hosts_lumped_by_program(self):
+        anna = build_usage(self.rows(), self.ACC, [], D2, D2)[0]
+        self.assertEqual([(p["program"], p["seconds"]) for p in anna["programs"]],
+                         [("ApplicationFrameHost", 1080), ("msedge", 200)])
+        self.assertNotIn("host", anna["programs"][0])
+
+    def test_browser_titles_never_split_programs(self):
+        rows = [U("PC", "PC\\anna", "msedge", D2, 60) | {"window": "A"},
+                U("PC", "PC\\anna", "msedge", D2, 60) | {"window": "B"}]
+        anna = build_usage(rows, self.ACC, [], D2, D2, host_programs=self.HOSTS)[0]
+        self.assertEqual([(p["program"], p["seconds"]) for p in anna["programs"]],
+                         [("msedge", 120)])
 
 
 class ActiveFlag(unittest.TestCase):

@@ -166,6 +166,28 @@ BEGIN
 END
 GO
 
+/* People: link the accounts of one person across PCs (read API: GET /persons, /usage).
+   UserName is the login WITHOUT the computer part (LEGION\anna -> anna), so one row
+   covers that login on every PC. Computer set = only on that PC (wins over a row
+   without Computer). Excluded = the person is hidden by the read API (parents, tests);
+   it is NOT the same as cfg.ExcludedUser, which stops the agent from recording.
+   An account without a row is its own person, named after its login.
+   Edit with sql/persons.sql. */
+IF OBJECT_ID('cfg.Person','U') IS NULL
+BEGIN
+    CREATE TABLE cfg.Person (
+        Id       INT IDENTITY(1,1) NOT NULL,
+        Person   NVARCHAR(64)  NOT NULL,                 -- display name, e.g. N'Anna'
+        Computer NVARCHAR(64)  NULL,                     -- NULL = on any PC
+        UserName NVARCHAR(128) NOT NULL,                 -- login without the computer part
+        Excluded BIT           NOT NULL CONSTRAINT DF_Person_Excluded DEFAULT 0,
+        Note     NVARCHAR(256) NULL,
+        CONSTRAINT PK_Person PRIMARY KEY CLUSTERED (Id DESC)
+    );
+    CREATE UNIQUE INDEX UX_Person_account ON cfg.Person (UserName, Computer);
+END
+GO
+
 /* =====================================================================
    SEED - default global settings (only if not present)
    ===================================================================== */

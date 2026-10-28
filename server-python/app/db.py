@@ -6,6 +6,7 @@ pymssql is used rather than pyodbc so the service needs no system ODBC driver -
 from __future__ import annotations
 
 import contextlib
+from datetime import date, datetime, timedelta
 from typing import Iterator
 
 import pymssql
@@ -187,3 +188,40 @@ def fetch_window_activity(cur, users: list[str], computer: str | None, limit: in
          "minutes": r[4], "program": r[5], "window": r[6]}
         for r in cur.fetchall()
     ]
+
+
+def fetch_persons(cur) -> list[dict]:
+    """cfg.Person rows (account -> person links). Empty when the table does not
+    exist yet, so the API keeps working before the upgrade script has run."""
+    cur.execute("SELECT CASE WHEN OBJECT_ID('cfg.Person','U') IS NULL THEN 0 ELSE 1 END")
+    if not cur.fetchone()[0]:
+        return []
+    cur.execute("SELECT Person, Computer, UserName, Excluded FROM cfg.Person")
+    return [{"person": r[0], "computer": r[1], "username": r[2], "excluded": bool(r[3])}
+            for r in cur.fetchall()]
+
+
+def fetch_usage_rows(cur, start: date, end: date, computer: str | None) -> list[dict]:
+    """Seconds in front per (computer, account, program, window title, day) for
+    start..end inclusive (the title lets /usage name host-process apps).
+    A window row belongs to the day of its last activity (EndTime)."""
+    params: list = [datetime(start.year, start.month, start.day),
+                    datetime(end.year, end.month, end.day) + timedelta(days=1)]
+    extra = ""
+    if computer:
+        extra = " AND Computer = %s"
+        params.append(computer)
+    cur.execute(
+        f"""
+        SELECT Computer, UserAccount, Program, WindowTitle,
+               CAST(ISNULL(EndTime, EventTime) AS DATE) AS Day,
+               SUM(ActiveSeconds)
+          FROM dbo.WindowActivity
+         WHERE ISNULL(EndTime, EventTime) >= %s AND ISNULL(EndTime, EventTime) < %s{extra}
+         GROUP BY Computer, UserAccount, Program, WindowTitle,
+                  CAST(ISNULL(EndTime, EventTime) AS DATE)
+        """,
+        params,
+    )
+    return [{"computer": r[0], "user": r[1], "program": r[2], "window": r[3], "day": r[4],
+             "seconds": int(r[5] or 0)} for r in cur.fetchall()]

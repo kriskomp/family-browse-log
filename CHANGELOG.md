@@ -3,6 +3,25 @@
 All notable changes to this project are documented here.
 Versions are date-based: `YYYY.MM.DD.N`.
 
+## 2026.10.28.6
+
+Persons and time in front of the computer (server side, groundwork for the Home Assistant integration).
+
+### Added
+- `GET /usage`: time in front of the computer per person: total, per PC, per program (top N, `programs_other`) and per day, with averages. `date`, `from`/`to` (a month is a range), `person`, `computer`, `programs`, `include_excluded`; default is today. Every duration has exact `seconds` and a readable `text` (`1 h 15 min`). A window row counts on the day of its last activity.
+- `GET /persons`: people and their accounts. Table `cfg.Person` links the logins of one person across PCs (`UserName` without the computer part, optional `Computer`, `Excluded` to hide a person); an account without a row is its own person, so nothing has to be configured. Edited with `server-python/sql/persons.sql` (a template with example names).
+- `person` in `GET /users` and in every `GET /activity` item, and a `person=` filter on `GET /activity`.
+
+- `GET /usage` lists host processes by window title: Microsoft Store apps all run in `ApplicationFrameHost`, so they are named by the app (`Solitaire & Casual Games`) with `"host"` set, instead of lumped together. `.env` key `FBL_USAGE_HOST_PROGRAMS` (default `ApplicationFrameHost`, comma-separated, empty = none).
+
+### Fixed
+- `docs/api.md`: a stale copy of the old window-grouping text left behind by 2026.10.26.5 is removed.
+
+### Notes
+- Read API login needs `SELECT` on `cfg.Person`. Until the table exists the API still works.
+- `cfg.Person.Excluded` (hide in the read API) is not `cfg.ExcludedUser` (stop recording).
+- Upgrade steps: `server-python/README.md`, *Upgrading to 2026.10.28.6*.
+
 ## 2026.10.26.5
 
 Window activity: one row per window per session.
