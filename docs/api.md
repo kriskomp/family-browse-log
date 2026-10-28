@@ -184,31 +184,6 @@ session** of the account. A window is:
 Data written before 2026.10.26.5 (no `SessionStart`) is merged once by
 `server-python/sql/migrate_2026.10.26.5.sql`.
 
----|---|
-| `EventTime` | first sample of the group (**from**) |
-| `EndTime` | last sample of the group (**to**) |
-| `SessionMinutes` | whole minutes between them, `floor((EndTime - EventTime) / 60 s)`; grows while the window stays in front |
-
-A sample **extends** the newest row of that `(Computer, UserAccount)` when all hold:
-
-- same `Program` and same `WindowTitle` (another tab or title starts a new row),
-- the pause since `EndTime` is at most `max(120, 3 * window_sample_sec)` seconds
-  (a real break such as idle time, logoff or sleep starts a new row; a few missed
-  samples do not),
-- the sample is not older than `EventTime`.
-
-Otherwise a new row is inserted. A sample that lies inside an existing group (the
-agent re-sent a block whose ACK was lost) changes nothing, so retries never inflate
-`SessionMinutes`. Samples of one request are processed oldest first, inside the same
-transaction as the rest of `/ingest`.
-
-A group in progress is updated on every push, so `EndTime` and `SessionMinutes` rise
-live (one sample shows `0` minutes until the next one arrives).
-
-Data written before 2026.10.26.5 (one row per sample, `EndTime IS NULL`) is merged once
-by `server-python/sql/migrate_2026.10.26.5.sql`. Rows not migrated still display
-correctly (`from = to`).
-
 ---
 
 ## Read API (Home Assistant)
@@ -225,14 +200,107 @@ after the user enters the server address and reader token.
 ```json
 {
   "users": [
-    {"computer": "LEGION", "user": "LEGION\\vvojc", "last_seen": "2026-10-25T18:03:00+01:00", "excluded": false}
+    {"computer": "LEGION", "user": "LEGION\\anna", "person": "Anna",
+     "last_seen": "2026-10-25T18:03:00+01:00", "excluded": false}
   ]
 }
 ```
 
 - `last_seen` — newest record of that account (web or window), local time with offset.
 - `excluded` — `true` when the account is listed in `cfg.ExcludedUser` (it is still
-  shown, so the picker is complete).
+  shown, so the picker is complete). This is the *recording* switch; hiding a person in the
+  read API is `cfg.Person.Excluded` (see *Persons*).
+- `person` — the person this account belongs to (see *Persons*); the login itself when
+  the account is not linked.
+
+### Persons
+
+A person links the accounts of one human across PCs: `LEGION\anna` and `LENOVO\ania`
+are one **Anna**. The link lives in the database (`cfg.Person`, edited with
+`server-python/sql/persons.sql`), so every client sees the same people.
+
+- A row says: *login `UserName` (the part after the backslash, case-insensitive) belongs to
+  `Person`*. With `Computer` empty it covers that login on every PC; with a computer it
+  applies to that PC only and wins over a row without one.
+- An account **without a row is its own person**, named after its login. Nothing has to be
+  configured to get started.
+- `Excluded = 1` hides the person in `GET /persons` and `GET /usage` (parents, tests);
+  `include_excluded=true` shows them. It is a presentation switch, unrelated to
+  `cfg.ExcludedUser` (which stops the agent from recording).
+- The person `id` is the name without diacritics, lower case, dashes (`Łukasz` ->
+  `lukasz`). Parameters named `person` accept the id or the name.
+
+### `GET /persons`
+
+People and their accounts, for the Home Assistant config flow (pick people, not accounts).
+
+| Param | Default | Meaning |
+|---|---|---|
+| `include_excluded` | `false` | also persons marked `Excluded` |
+
+```json
+{
+  "persons": [
+    {"id": "anna", "name": "Anna", "excluded": false, "last_seen": "2026-10-28T12:00:00+01:00",
+     "accounts": [
+       {"computer": "LEGION", "user": "LEGION\\anna", "last_seen": "2026-10-28T10:00:00+01:00",
+        "recording_excluded": false},
+       {"computer": "LENOVO", "user": "LENOVO\\ania", "last_seen": "2026-10-28T12:00:00+01:00",
+        "recording_excluded": false}
+     ]}
+  ]
+}
+```
+
+### `GET /usage`
+
+Time in front of the computer: total, per PC, per program and per day. Window rows are
+summed by `ActiveSeconds`, so it is time with the keyboard or mouse in use (the agent stops
+sampling after `idle_limit_sec` without input; reading or a film without touching the PC
+is not counted). A row belongs to the day of its **last activity**, so a session running
+past midnight counts fully on the day it ends.
+
+| Param | Default | Meaning |
+|---|---|---|
+| `date` | today | one day, `YYYY-MM-DD` |
+| `from`, `to` | — | inclusive range (a month = first to last day); a missing `to` is today, a missing `from` is `to`; at most 366 days |
+| `person` | all | repeat for several people (id or name) |
+| `computer` | all | one PC: time on that PC only |
+| `programs` | `10` | top N programs per person, the rest in `programs_other`; `0` = all, max 100 |
+| `include_excluded` | `false` | also persons marked `Excluded` |
+
+`date` together with `from`/`to` returns `422`, as do bad dates or `from` after `to`.
+Day boundaries are local time (`FBL_LOCAL_TZ`).
+
+```json
+{
+  "generated_at": "2026-10-28T19:40:00+01:00",
+  "period": {"from": "2026-10-28", "to": "2026-10-28", "days": 1},
+  "programs_limit": 10,
+  "persons": [
+    {"id": "anna", "name": "Anna", "excluded": false,
+     "total": {"seconds": 5100, "text": "1 h 25 min"},
+     "computers": [{"computer": "LEGION", "seconds": 3600, "text": "1 h"},
+                   {"computer": "LENOVO", "seconds": 1500, "text": "25 min"}],
+     "programs": [{"program": "msedge", "seconds": 4500, "text": "1 h 15 min"}],
+     "programs_other": {"count": 1, "seconds": 600, "text": "10 min"},
+     "per_day": [{"date": "2026-10-28", "seconds": 5100, "text": "1 h 25 min"}],
+     "active_days": 1,
+     "average": {"per_active_day": {"seconds": 5100, "text": "1 h 25 min"},
+                 "per_day": {"seconds": 5100, "text": "1 h 25 min"}}}
+  ]
+}
+```
+
+- Every duration has exact `seconds` (for calculations and automations) and a readable
+  `text`: `1 h 15 min`, `2 h`, `45 min`, `< 1 min` (never `75 min`).
+- A known person with no time in the range is still listed, with zeros, so a dashboard
+  shows `0 min` instead of a missing value.
+- Programs are merged case-insensitively. `per_day` lists every day of the range
+  (zeros included). `average.per_active_day` divides by the days with any time,
+  `average.per_day` by all days of the range.
+- Only rows written by 2026.10.26.5 or later carry `ActiveSeconds` (older rows were
+  converted by the migration script).
 
 ### `GET /activity`
 
@@ -241,7 +309,8 @@ Newest activity, merged into one timeline, newest first.
 | Param | Default | Meaning |
 |---|---|---|
 | `kind` | `both` | `web`, `windows` or `both` |
-| `user` | all | repeat the parameter to pick several accounts: `user=LEGION%5Cvvojc&user=LEGION%5Cstani` |
+| `user` | all | repeat the parameter to pick several accounts: `user=LEGION%5Canna&user=LEGION%5Cania` |
+| `person` | all | repeat to pick people (id or name); adds all their accounts. A person with no accounts returns no items |
 | `computer` | all | a single PC |
 | `limit` | `FBL_ACTIVITY_DEFAULT_LIMIT` (20) | items to return; capped at `FBL_ACTIVITY_MAX_LIMIT` (200) |
 
@@ -255,9 +324,9 @@ Response:
   "items": [
     {"type": "window", "time": "2026-10-25T18:02:40+01:00",
      "from": "2026-10-25T17:49:10+01:00", "to": "2026-10-25T18:02:40+01:00", "minutes": 13, "active": true,
-     "user": "LEGION\\vvojc", "computer": "LEGION", "program": "msedge",
+     "person": "Anna", "user": "LEGION\\anna", "computer": "LEGION", "program": "msedge",
      "window": "Blokada reklam - Edge"},
-    {"type": "web", "time": "2026-10-25T18:01:05+01:00", "user": "LEGION\\vvojc",
+    {"type": "web", "time": "2026-10-25T18:01:05+01:00", "person": "Anna", "user": "LEGION\\anna",
      "computer": "LEGION", "url": "https://github.com/kriskomp", "title": "kriskomp", "visits": 2}
   ],
   "summary": {
@@ -267,6 +336,7 @@ Response:
 }
 ```
 
+- Every item has `person` (see *Persons*).
 - **URLs never include the query string or fragment** (`scheme://host/path` only).
   Query strings often hold login codes and session tokens.
 - **Window items are rows of *Window grouping***: `from` = first time in front in that session,

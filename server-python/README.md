@@ -52,7 +52,21 @@ The read API (`GET /activity`, `GET /users`) reads `dbo.BrowsingHistory`,
 GRANT SELECT ON dbo.BrowsingHistory TO [<login>];
 GRANT SELECT ON dbo.WindowActivity  TO [<login>];
 GRANT SELECT ON cfg.ExcludedUser    TO [<login>];
+GRANT SELECT ON cfg.Person          TO [<login>];   -- since 2026.10.28.6 (persons, usage)
 ```
+
+## Upgrading to 2026.10.28.6 (persons and usage)
+
+1. Run `sql/schema.sql` (idempotent): it creates `cfg.Person`. Grant `SELECT` on it to the
+   read-API login (see above).
+2. Pull the code and restart the service. Until `cfg.Person` exists the API still works
+   (every account is its own person), so the order is not critical.
+3. Link accounts with `sql/persons.sql` (it ships with **example** names - put your own
+   in; the file is a template, do not commit real names to a public repo). Changes apply
+   at once, no restart.
+
+New endpoints: `GET /persons`, `GET /usage`; `person` in `GET /users` / `GET /activity`
+(`docs/api.md`, *Persons*, `GET /usage`).
 
 ## Upgrading to 2026.10.26.5 (window activity per session)
 
@@ -114,11 +128,23 @@ BASE=http://localhost:8080
 # accounts for the picker
 curl -s "$BASE/users" -H "Authorization: Bearer $READER"
 
+# people (accounts of several PCs linked in cfg.Person)
+curl -s "$BASE/persons" -H "Authorization: Bearer $READER"
+
+# time in front of the computer: today, a day, a month; 3 top programs
+curl -s "$BASE/usage" -H "Authorization: Bearer $READER"
+curl -s "$BASE/usage?date=2026-10-27&programs=3" -H "Authorization: Bearer $READER"
+curl -s "$BASE/usage?from=2026-10-01&to=2026-10-31" -H "Authorization: Bearer $READER"
+
+# expect 422 (date together with from/to, or a bad date)
+curl -s -o /dev/null -w "%{http_code}\n" "$BASE/usage?date=2026-10-27&from=2026-10-01" -H "Authorization: Bearer $READER"
+curl -s -o /dev/null -w "%{http_code}\n" "$BASE/usage?date=nonsense" -H "Authorization: Bearer $READER"
+
 # newest 5 web + window items
 curl -s "$BASE/activity?kind=both&limit=5" -H "Authorization: Bearer $READER"
 
 # web only, two accounts (repeat user=)
-curl -s "$BASE/activity?kind=web&user=LEGION%5Cvvojc&user=LEGION%5Cstani" -H "Authorization: Bearer $READER"
+curl -s "$BASE/activity?kind=web&user=LEGION%5Canna&user=LEGION%5Cania" -H "Authorization: Bearer $READER"
 
 # limit above the maximum is capped (expect "limit": 200)
 curl -s "$BASE/activity?limit=5000" -H "Authorization: Bearer $READER" | head -c 200; echo

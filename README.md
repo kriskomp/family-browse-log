@@ -38,11 +38,13 @@ The two parts talk only through a JSON HTTP contract documented in
 All v2 tables live in a dedicated MS SQL database **`monitor`**, split by schema:
 
 - **`dbo`** — incoming data: `BrowsingHistory`, `WindowActivity` (one row per window per session: from, to, total time in front), `IngestState`
-- **`cfg`** — configuration: `Setting`, `ExcludedUser`, `Device`
+- **`cfg`** — configuration: `Setting`, `ExcludedUser`, `Device`, `Person` (links the accounts of one person across PCs)
 
 See [`server-python/sql/schema.sql`](server-python/sql/schema.sql) for the schema and
 [`server-python/sql/settings.sql`](server-python/sql/settings.sql) to tune settings
-from the database (no code changes).
+from the database (no code changes) and
+[`server-python/sql/persons.sql`](server-python/sql/persons.sql) to link accounts of one
+person across PCs (used by `GET /persons` and `GET /usage`).
 
 ## Status
 

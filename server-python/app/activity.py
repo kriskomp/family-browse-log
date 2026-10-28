@@ -5,7 +5,9 @@ with the standard library alone (see server-python/tests/).
 """
 from __future__ import annotations
 
-from datetime import datetime
+import re
+import unicodedata
+from datetime import date, datetime, timedelta
 from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
@@ -138,7 +140,8 @@ def local_iso(naive: datetime, tz: ZoneInfo) -> str:
 def merge_activity(web_rows: list[dict], window_rows: list[dict],
                    tz: ZoneInfo, limit: int,
                    latest_web: list[dict] | None = None,
-                   latest_window: list[dict] | None = None) -> tuple[list[dict], dict]:
+                   latest_window: list[dict] | None = None,
+                   person_of=None) -> tuple[list[dict], dict]:
     """Merge web and window rows into one timeline, newest first.
 
     Rows are dicts with a naive local 'time' key (for windows: the END of the group;
@@ -173,6 +176,9 @@ def merge_activity(web_rows: list[dict], window_rows: list[dict],
             "program": r["program"] or "",
             "window": r["window"] or "",
         }))
+    if person_of is not None:
+        for _, item in timed:
+            item["person"] = person_of(item["computer"], item["user"])["name"]
     timed.sort(key=lambda pair: pair[0], reverse=True)
     items = [item for _, item in timed[:limit]]
 
@@ -185,3 +191,182 @@ def merge_activity(web_rows: list[dict], window_rows: list[dict],
                            if win_for_summary else None),
     }
     return items, summary
+
+
+# ---- persons: link accounts of different PCs into one person ------------------
+
+_PL = str.maketrans({"\u0142": "l", "\u0141": "L"})   # l-stroke does not decompose in NFKD
+
+
+def slugify(name: str) -> str:
+    """'\u0141ukasz' -> 'lukasz' (stable id for a person name)."""
+    ascii_ = "".join(c for c in unicodedata.normalize("NFKD", (name or "").translate(_PL))
+                     if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", "-", ascii_.lower()).strip("-") or "unknown"
+
+
+def user_part(account: str | None) -> str:
+    """'LENOVO\\anna' -> 'anna' (the part before the backslash is the computer)."""
+    return (account or "").rsplit("\\", 1)[-1]
+
+
+def resolve_person(computer: str | None, account: str | None, rows: list[dict]) -> dict:
+    """Person of an account: {'id', 'name', 'excluded'}.
+
+    rows come from cfg.Person: {'person', 'computer' (None = any PC), 'username',
+    'excluded'}. A row matches on the user name (the part after the backslash,
+    case-insensitive), so one row covers that login on every PC; a row with a
+    computer wins over one without. An account with no row is its own person, named
+    after its user name, so nothing needs configuring to get started.
+    A person is excluded when any of its rows is.
+    """
+    uname = user_part(account).casefold()
+    comp = (computer or "").casefold()
+    best = None
+    for r in rows:
+        if r["username"].casefold() != uname:
+            continue
+        if r["computer"] and r["computer"].casefold() != comp:
+            continue
+        specific = 1 if r["computer"] else 0
+        if best is None or specific > best[0]:
+            best = (specific, r)
+    if best is None:
+        name = user_part(account) or (account or "")
+        return {"id": slugify(name), "name": name, "excluded": False}
+    name = best[1]["person"]
+    excluded = any(r["excluded"] for r in rows
+                   if slugify(r["person"]) == slugify(name))
+    return {"id": slugify(name), "name": name, "excluded": excluded}
+
+
+def build_persons(accounts: list[tuple], rows: list[dict], is_recording_excluded,
+                  tz: ZoneInfo, include_excluded: bool = False) -> list[dict]:
+    """GET /persons: accounts = [(computer, account, last_seen naive local or None)]."""
+    people: dict[str, dict] = {}
+    for comp, acc, last in accounts:
+        who = resolve_person(comp, acc, rows)
+        p = people.setdefault(who["id"], {"id": who["id"], "name": who["name"],
+                                          "excluded": who["excluded"], "last_seen": None,
+                                          "accounts": []})
+        p["accounts"].append({
+            "computer": comp, "user": acc,
+            "last_seen": local_iso(last, tz) if last else None,
+            "recording_excluded": bool(is_recording_excluded(acc, comp)),
+        })
+        if last and (p["last_seen"] is None or local_iso(last, tz) > p["last_seen"]):
+            p["last_seen"] = local_iso(last, tz)
+    out = [p for p in people.values() if include_excluded or not p["excluded"]]
+    return sorted(out, key=lambda p: p["name"].casefold())
+
+
+# ---- usage: time in front of the computer -------------------------------------
+
+def format_duration(seconds: int) -> str:
+    """Readable and language-neutral: '1 h 15 min', '2 h', '45 min', '< 1 min'."""
+    s = max(0, int(seconds))
+    if s == 0:
+        return "0 min"
+    if s < 60:
+        return "< 1 min"
+    h, m = divmod(s // 60, 60)
+    if h and m:
+        return f"{h} h {m} min"
+    return f"{h} h" if h else f"{m} min"
+
+
+def duration(seconds: int) -> dict:
+    return {"seconds": int(seconds), "text": format_duration(seconds)}
+
+
+MAX_RANGE_DAYS = 366
+
+
+def resolve_range(day: str | None, start: str | None, end: str | None,
+                  today: date) -> tuple[date, date]:
+    """Inclusive date range of GET /usage. `date` = one day; `from`/`to` = a range
+    (a missing end defaults to today, a missing start to the end). Nothing = today."""
+    try:
+        if day and (start or end):
+            raise ValueError("use either date or from/to, not both")
+        if day:
+            d = date.fromisoformat(day)
+            return d, d
+        b = date.fromisoformat(start) if start else None
+        e = date.fromisoformat(end) if end else None
+    except ValueError as exc:
+        raise ValueError(str(exc) if "either" in str(exc)
+                         else "dates must look like 2026-10-28") from None
+    if b is None and e is None:
+        return today, today
+    e = e or today
+    b = b or e
+    if b > e:
+        raise ValueError("from must not be after to")
+    if (e - b).days + 1 > MAX_RANGE_DAYS:
+        raise ValueError(f"range is limited to {MAX_RANGE_DAYS} days")
+    return b, e
+
+
+def build_usage(rows: list[dict], accounts: list[tuple], person_rows: list[dict],
+                start: date, end: date, programs_limit: int = 10,
+                include_excluded: bool = False, person_ids: set | None = None,
+                computer: str | None = None) -> list[dict]:
+    """GET /usage: time in front per person, split by computer, program and day.
+
+    rows     [{'computer','user','program','day': date,'seconds'}] already limited to
+             the range (a window row counts on the day of its last activity)
+    accounts [(computer, account, ...)] every known account, so a person with no time
+             in the range still appears with zeros
+    programs_limit  top N programs, the rest summed in 'programs_other' (0 = all)
+    """
+    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    people: dict[str, dict] = {}
+
+    def person(comp, acc):
+        who = resolve_person(comp, acc, person_rows)
+        return people.setdefault(who["id"], {
+            "id": who["id"], "name": who["name"], "excluded": who["excluded"],
+            "computers": {}, "programs": {}, "per_day": {d: 0 for d in days}})
+
+    for a in accounts:
+        if not computer or a[0] == computer:
+            person(a[0], a[1])
+    for r in rows:
+        if computer and r["computer"] != computer:
+            continue
+        if r["day"] < start or r["day"] > end:
+            continue                      # defensive: never count rows outside the range
+        p = person(r["computer"], r["user"])
+        sec = int(r["seconds"] or 0)
+        p["computers"][r["computer"]] = p["computers"].get(r["computer"], 0) + sec
+        prog = r["program"] or "(unknown)"
+        key = prog.casefold()
+        name, total = p["programs"].get(key, (prog, 0))
+        p["programs"][key] = (name, total + sec)
+        p["per_day"][r["day"]] += sec
+
+    out = []
+    for p in people.values():
+        if (p["excluded"] and not include_excluded) or (person_ids and p["id"] not in person_ids):
+            continue
+        progs = sorted(p["programs"].values(), key=lambda x: (-x[1], x[0].casefold()))
+        shown = progs if programs_limit == 0 else progs[:programs_limit]
+        rest = [] if programs_limit == 0 else progs[programs_limit:]
+        per_day = [{"date": d.isoformat(), **duration(p["per_day"][d])} for d in days]
+        total = sum(p["per_day"].values())
+        active = sum(1 for d in days if p["per_day"][d] > 0)
+        out.append({
+            "id": p["id"], "name": p["name"], "excluded": p["excluded"],
+            "total": duration(total),
+            "computers": [{"computer": c, **duration(s)} for c, s in
+                          sorted(p["computers"].items(), key=lambda x: (-x[1], x[0].casefold()))],
+            "programs": [{"program": n, **duration(s)} for n, s in shown],
+            "programs_other": ({"count": len(rest), **duration(sum(s for _, s in rest))}
+                               if rest else None),
+            "per_day": per_day,
+            "active_days": active,
+            "average": {"per_active_day": duration(total // active if active else 0),
+                        "per_day": duration(total // len(days))},
+        })
+    return sorted(out, key=lambda x: x["name"].casefold())
