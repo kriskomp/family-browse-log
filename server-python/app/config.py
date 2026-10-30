@@ -52,6 +52,13 @@ class Settings:
         self.usage_host_programs: frozenset[str] = parse_program_list(
             os.getenv("FBL_USAGE_HOST_PROGRAMS", "ApplicationFrameHost"))
 
+        # --- usage: window titles left out of /usage entirely (exact match, case-insensitive,
+        # separated by ";"). Technical windows, e.g. the Microsoft Family Safety app.
+        self.usage_ignore_titles: frozenset[str] = frozenset(
+            t.strip().casefold() for t in
+            os.getenv("FBL_USAGE_IGNORE_TITLES", "Microsoft Family Safety").split(";")
+            if t.strip())
+
         # --- timezone used to derive the calendar Day from epoch timestamps ---
         self.local_tz: str = os.getenv("FBL_LOCAL_TZ", "Europe/Warsaw")
 

@@ -312,11 +312,13 @@ def build_usage(rows: list[dict], accounts: list[tuple], person_rows: list[dict]
                 start: date, end: date, programs_limit: int = 10,
                 include_excluded: bool = False, person_ids: set | None = None,
                 computer: str | None = None,
-                host_programs: frozenset = frozenset()) -> list[dict]:
+                host_programs: frozenset = frozenset(),
+                ignore_titles: frozenset = frozenset()) -> list[dict]:
     """GET /usage: time in front per person, split by computer, program and day.
 
     rows     [{'computer','user','program','window','day': date,'seconds'}] already
              limited to the range (a window row counts on the day of its last activity)
+    ignore_titles  casefolded window titles that are not counted at all (exact match)
     host_programs  lower-case process names that only host other apps (Store apps run in
              ApplicationFrameHost): listed by window title, with 'host' set
     accounts [(computer, account, ...)] every known account, so a person with no time
@@ -340,6 +342,8 @@ def build_usage(rows: list[dict], accounts: list[tuple], person_rows: list[dict]
             continue
         if r["day"] < start or r["day"] > end:
             continue                      # defensive: never count rows outside the range
+        if (r.get("window") or "").strip().casefold() in ignore_titles:
+            continue                      # technical window, left out of usage
         p = person(r["computer"], r["user"])
         sec = int(r["seconds"] or 0)
         p["computers"][r["computer"]] = p["computers"].get(r["computer"], 0) + sec

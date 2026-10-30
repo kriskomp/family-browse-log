@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 Versions are date-based: `YYYY.MM.DD.N`.
 
+## 2026.10.30.7
+
+Usage: technical windows can be left out.
+
+### Added
+- `FBL_USAGE_IGNORE_TITLES` (default `Microsoft Family Safety`, separated by `;`): window titles left out of `GET /usage` entirely. Exact match, case-insensitive; browser titles that only contain the phrase are kept. The stored data is not changed and `/activity` is not affected.
+
 ## 2026.10.28.6
 
 Persons and time in front of the computer (server side, groundwork for the Home Assistant integration).
