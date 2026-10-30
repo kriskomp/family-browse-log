@@ -483,6 +483,24 @@ class UsageHostPrograms(unittest.TestCase):
                          [("msedge", 120)])
 
 
+class UsageIgnoreTitles(unittest.TestCase):
+    ACC = [("PC", "PC\\anna", None)]
+
+    def test_exact_title_left_out(self):
+        rows = [U("PC", "PC\\anna", "ApplicationFrameHost", D2, 600) | {"window": "Microsoft Family Safety"},
+                U("PC", "PC\\anna", "ApplicationFrameHost", D2, 120) | {"window": "microsoft family safety "},
+                U("PC", "PC\\anna", "msedge", D2, 300) | {"window": "Strona - Microsoft Family Safety"}]
+        ign = frozenset({"microsoft family safety"})
+        anna = build_usage(rows, self.ACC, [], D2, D2, ignore_titles=ign)[0]
+        self.assertEqual(anna["total"]["seconds"], 300)     # browser title containing it is kept
+        self.assertEqual([p["program"] for p in anna["programs"]], ["msedge"])
+
+    def test_default_keeps_everything(self):
+        rows = [U("PC", "PC\\anna", "ApplicationFrameHost", D2, 600) | {"window": "Microsoft Family Safety"}]
+        anna = build_usage(rows, self.ACC, [], D2, D2)[0]
+        self.assertEqual(anna["total"]["seconds"], 600)
+
+
 class ActiveFlag(unittest.TestCase):
     NOW = datetime(2026, 10, 26, 19, 0, 0)
 

@@ -303,6 +303,10 @@ Day boundaries are local time (`FBL_LOCAL_TZ`).
   Casual Games`, `Odtwarzacz multimedialny`. Such an entry has `"host": "ApplicationFrameHost"`.
   A host row with an empty title stays under the process name. Other programs, browsers
   included, are never split by title. Nothing changes in the stored data.
+- **Ignored windows** (`FBL_USAGE_IGNORE_TITLES`, default `Microsoft Family Safety`, separated by `;`):
+  rows whose window title equals one of these (exact, case-insensitive) are left out of `/usage`
+  entirely, so technical windows do not show up as child activity. Browser titles that merely
+  contain the phrase are kept. Only `/usage` is affected; the stored data is not changed.
 - Programs are merged case-insensitively. `per_day` lists every day of the range
   (zeros included). `average.per_active_day` divides by the days with any time,
   `average.per_day` by all days of the range.
