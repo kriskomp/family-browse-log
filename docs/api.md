@@ -40,7 +40,14 @@ Called by the agent on start and periodically afterwards.
   "last_visit_id": {
     "Default": 259750,
     "Profile 1": 0
-  }
+  },
+  "since": {
+    "Default": 1762450000
+  },
+  "commands": [
+    { "id": 4, "command": "backfill", "arg": 14 }
+  ],
+  "server_time": 1762451234
 }
 ```
 
@@ -55,13 +62,26 @@ Called by the agent on start and periodically afterwards.
   - `block_size` — max visits per `POST /ingest` block.
   - `max_backfill` — on first run, how many newest visits to backfill (`0` = all).
   - `idle_limit_sec` — no window sampling after this many idle seconds.
+  - `history_overlap_sec` — the agent reads history from `since` minus this many
+    seconds, so a visit committed late is not missed (default 900).
+  - `backfill_days` — a profile the server has never seen, or a `backfill` command
+    without `arg`, reads this many days back (default 7), at most `max_backfill` visits.
   - `window_all` — `0` = record only the active (foreground) window [default],
     `1` = record every open window (the old v1 behaviour).
 - If the agent cannot reach `GET /config`, it keeps its last known settings (or the
   built-in defaults) and buffers data offline until the server is reachable again.
 - `last_visit_id` — map `EdgeProfile -> LastVisitId` (from `dbo.IngestState`).
-  A profile the server has never seen returns `0` (or is simply absent); the agent
-  treats a missing profile as `0`.
+  Legacy: kept for agents older than 2026.11.06.8; newer agents ignore it.
+- `since` — map `EdgeProfile -> unix seconds` of the newest visit stored (from
+  `dbo.BrowsingVisit`; before that table has rows, from the newest `LastVisit` in
+  `dbo.BrowsingHistory`). **This is where the agent resumes reading history.** A profile
+  that is absent has never been seen: the agent reads `backfill_days` back. A server
+  without `since` is an old one: the new agent waits.
+- `commands` — pending commands for this account (`cfg.AgentCommand`, not confirmed
+  yet): `{id, command, arg}`. The only command is `backfill` (`arg` = days, may be null).
+  The agent confirms with `acked` in its next `POST /ingest`; until then the server
+  keeps sending it.
+- `server_time` — server clock, unix seconds.
 
 **Errors**: `401` invalid/missing token.
 
@@ -84,7 +104,13 @@ any window-activity rows gathered since the last push). One profile per request.
   ],
   "windows": [
     { "ts": 1760000000, "session_min": 12, "program": "msedge", "window": "Example - Edge" }
-  ]
+  ],
+  "agent_version": "2026.11.06.8",
+  "diag": [
+    { "profile": "Default", "history_mtime": 1760000100, "max_visit_id": 259751,
+      "max_visit_ts": 1760000000, "rows_read": 1, "error": null }
+  ],
+  "acked": [4]
 }
 ```
 
@@ -93,14 +119,19 @@ any window-activity rows gathered since the last push). One profile per request.
 | `computer` | `Computer` | |
 | `user` | `UserAccount` | |
 | `profile` | `EdgeProfile` | |
-| `visits[].visit_id` | drives `IngestState.LastVisitId` | Edge `visits.id`, strictly increasing |
+| `visits[].visit_id` | tie-breaker, `IngestState.LastVisitId` (legacy) | Edge `visits.id`; only unique inside one History file, NOT used to decide what is new |
 | `visits[].url` | `BrowsingHistory.Url` | truncated to 2048 |
 | `visits[].title` | `BrowsingHistory.Title` | truncated to 1024 |
-| `visits[].ts` | → `Day`, `FirstVisit`, `LastVisit` | epoch seconds UTC |
+| `visits[].ts` | → `Day`, `FirstVisit`, `LastVisit`, visit identity | epoch seconds UTC |
 | `windows[].ts` | `WindowActivity.EventTime` / `EndTime` | epoch seconds UTC; samples are grouped per window and session, see *Window grouping* |
 | `windows[].session_min` | — | ignored since 2026.10.26.5; the server computes `SessionMinutes` itself. The agent may send `0`. |
 | `windows[].program` | `WindowActivity.Program` | |
 | `windows[].window` | `WindowActivity.WindowTitle` | truncated to 2048 |
+
+Optional (agent 2026.11.06.8+): `agent_version`; `diag` - per Edge profile what the agent
+sees (`history_mtime` = History file time, `max_visit_id`/`max_visit_ts` = newest visit in the
+file, `rows_read` this cycle, `error`) → `dbo.AgentStatus`; `acked` - ids of executed
+`cfg.AgentCommand` rows (max 50) → `AckedAt`.
 
 Both `visits` and `windows` may be empty arrays (e.g. a pure heartbeat, or a push
 that only carries window activity).
@@ -117,13 +148,13 @@ that only carries window activity).
 }
 ```
 
-- `last_visit_id` — the new resume point for this `(computer, user, profile)`.
-  The agent stores this **only after receiving the ACK**, then continues with the
-  next block. This makes a last-moment logout safe: the next session resumes from
-  the last acknowledged block.
-- **Idempotency**: the server ignores any visit whose `visit_id <= LastVisitId`
-  currently stored, so re-sending a block that was already applied (after an
-  uncertain ACK) never double-counts. Reported as `skipped_visits`.
+- `last_visit_id` — legacy resume id for agents older than 2026.11.06.8; it never
+  goes down. Newer agents ignore it.
+- **Idempotency**: a visit is identified by `(computer, user, profile, ts, SHA-256 of the
+  URL)`. The server stores that key in `dbo.BrowsingVisit` and counts a visit only when
+  the key is new, so a re-sent block, the read overlap and a `backfill` never
+  double-count. Reported as `skipped_visits`. Two visits of one URL in the same second
+  count as one.
 - If the user is excluded, the server accepts the request but writes nothing and
   returns the unchanged `last_visit_id`.
 
@@ -135,13 +166,16 @@ that only carries window activity).
 
 For a single `/ingest` call, inside one DB transaction:
 
-1. Drop incoming visits with `visit_id <= LastVisitId`.
+1. Keep only visits with no row in `dbo.BrowsingVisit` yet (inserting the key is the
+   check); visits at or before a profile's *cutoff marker* (data from before the table
+   existed) are skipped. Old key rows are purged after `FBL_VISIT_DEDUP_DAYS` (60).
 2. Aggregate the rest by `(Day, Url)`: `VisitCount`, earliest `FirstVisit`,
    latest `LastVisit` (and its `Title`). Upsert into `dbo.BrowsingHistory`.
 3. Fold `windows` samples into `dbo.WindowActivity`, one row per window per session
    (see *Window grouping* below).
-4. Advance `dbo.IngestState.LastVisitId` to the max seen (if greater).
-5. Update `cfg.Device.LastSeen` (heartbeat) for this computer.
+4. Advance `dbo.IngestState.LastVisitId` (legacy) to the max accepted id (if greater).
+5. Store `diag` in `dbo.AgentStatus` and confirm `acked` commands.
+6. Update `cfg.Device.LastSeen` (heartbeat) for this computer.
 
 ### Window grouping
 

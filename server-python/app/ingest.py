@@ -1,13 +1,15 @@
 """Write path for POST /ingest: aggregate + upsert in one transaction."""
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from .config import get_settings
 from .activity import group_key, group_samples, session_gap_sec
-from .db import get_last_visit_id_for_profile, resolve_settings
+from .db import get_last_visit_id_for_profile, get_visit_cutoff, resolve_settings
 from .models import IngestRequest, IngestResponse
+from .visits import ZERO_HASH, is_before_cutoff, order_visits, url_hash
 
 
 def _local_dt(ts: int, tz: ZoneInfo) -> datetime:
@@ -19,20 +21,10 @@ def _local_dt(ts: int, tz: ZoneInfo) -> datetime:
     )
 
 
-def process_ingest(conn, req: IngestRequest) -> IngestResponse:
-    tz = ZoneInfo(get_settings().local_tz)
-    cur = conn.cursor()
-
-    last_id = get_last_visit_id_for_profile(cur, req.computer, req.user, req.profile)
-
-    # 1) idempotency: drop anything already applied
-    new_visits = [v for v in req.visits if v.visit_id > last_id]
-    skipped = len(req.visits) - len(new_visits)
-
-    # 2) aggregate by (Day, Url)
+def aggregate_visits(visits, tz: ZoneInfo) -> dict[tuple[str, str], dict]:
+    """Visits -> one entry per (Day, Url): count, earliest/latest time, latest title."""
     agg: dict[tuple[str, str], dict] = {}
-    max_id = last_id
-    for v in new_visits:
+    for v in visits:
         dt = _local_dt(v.ts, tz)
         day = dt.date()
         url = (v.url or "")[:2048]
@@ -49,8 +41,53 @@ def process_ingest(conn, req: IngestRequest) -> IngestResponse:
             if dt > a["last"]:
                 a["last"] = dt
                 a["title"] = title
-        if v.visit_id > max_id:
-            max_id = v.visit_id
+    return agg
+
+
+def process_ingest(conn, req: IngestRequest) -> IngestResponse:
+    settings = get_settings()
+    tz = ZoneInfo(settings.local_tz)
+    cur = conn.cursor()
+
+    # Edge's visit id is only kept as a legacy resume point for older agents (GET /config
+    # still serves it) and for diagnostics: it is NOT used to decide what is new.
+    last_id = get_last_visit_id_for_profile(cur, req.computer, req.user, req.profile)
+
+    # A visit is new when dbo.BrowsingVisit has no row for (account, profile, time, URL hash)
+    # yet. The check is made visit by visit inside the transaction below.
+    insert_visit = """
+    INSERT INTO dbo.BrowsingVisit (Computer, UserAccount, EdgeProfile, VisitTs, UrlHash)
+    OUTPUT inserted.VisitTs
+    SELECT %(c)s, %(u)s, %(p)s, %(ts)s, CONVERT(BINARY(32), %(h)s, 2)
+     WHERE NOT EXISTS (SELECT 1 FROM dbo.BrowsingVisit
+                        WHERE Computer=%(c)s AND UserAccount=%(u)s AND EdgeProfile=%(p)s
+                          AND VisitTs=%(ts)s AND UrlHash=CONVERT(BINARY(32), %(h)s, 2));
+    """
+
+    # dbo.BrowsingVisit only has to cover the de-duplication window
+    purge_visits = """
+    DELETE TOP (500) FROM dbo.BrowsingVisit
+     WHERE Computer=%(c)s AND UserAccount=%(u)s AND EdgeProfile=%(p)s AND VisitTs < %(before)s
+       AND UrlHash <> CONVERT(BINARY(32), %(zero)s, 2);
+    """
+
+    ack_command = """
+    UPDATE cfg.AgentCommand SET AckedAt = SYSDATETIME()
+     WHERE Id=%(id)s AND Computer=%(c)s AND UserAccount=%(u)s AND AckedAt IS NULL;
+    """
+
+    upsert_status = """
+    UPDATE dbo.AgentStatus
+       SET ReportedAt=SYSDATETIME(), AgentVersion=%(ver)s, HistoryMtime=%(hm)s,
+           MaxVisitId=%(mid)s, MaxVisitTime=%(vt)s, RowsRead=%(rows)s, LastError=%(err)s
+     WHERE Computer=%(c)s AND UserAccount=%(u)s AND EdgeProfile=%(p)s;
+    IF @@ROWCOUNT = 0
+    INSERT INTO dbo.AgentStatus
+        (Computer, UserAccount, EdgeProfile, ReportedAt, AgentVersion, HistoryMtime,
+         MaxVisitId, MaxVisitTime, RowsRead, LastError)
+    VALUES (%(c)s, %(u)s, %(p)s, SYSDATETIME(), %(ver)s, %(hm)s,
+            %(mid)s, %(vt)s, %(rows)s, %(err)s);
+    """
 
     upsert_hist = """
     UPDATE dbo.BrowsingHistory
@@ -111,8 +148,42 @@ def process_ingest(conn, req: IngestRequest) -> IngestResponse:
     INSERT INTO cfg.Device (Computer, LastSeen) VALUES (%(c)s, SYSDATETIME());
     """
 
+    new_visits: list = []
+    skipped = 0
+    max_id = last_id
     try:
-        for a in agg.values():
+        # 1) idempotency: keep only visits not counted yet, oldest first
+        cutoff, create_marker = (get_visit_cutoff(cur, req.computer, req.user, req.profile, tz)
+                                 if req.visits else (None, False))
+        if create_marker:               # remember the cutoff for good (see get_visit_cutoff)
+            cur.execute(insert_visit, {"c": req.computer, "u": req.user, "p": req.profile,
+                                       "ts": cutoff, "h": ZERO_HASH})
+            cur.fetchone()
+        for v in order_visits(req.visits):
+            if is_before_cutoff(v.ts, cutoff):
+                skipped += 1            # counted by an older server version
+                continue
+            cur.execute(insert_visit, {
+                "c": req.computer, "u": req.user, "p": req.profile, "ts": v.ts,
+                "h": url_hash((v.url or "")[:2048]),
+            })
+            if cur.fetchone() is None:
+                skipped += 1            # already stored: a re-sent block or the read overlap
+                continue
+            new_visits.append(v)
+            if v.visit_id > max_id:
+                max_id = v.visit_id
+
+        # keep dbo.BrowsingVisit small: only the de-duplication window is needed
+        if req.visits and settings.visit_dedup_days > 0:
+            cur.execute(purge_visits, {
+                "c": req.computer, "u": req.user, "p": req.profile,
+                "before": int(time.time()) - settings.visit_dedup_days * 86400,
+                "zero": ZERO_HASH,          # the cutoff marker is never purged
+            })
+
+        # 2) aggregate what is new by (Day, Url) and upsert
+        for a in aggregate_visits(new_visits, tz).values():
             cur.execute(upsert_hist, {
                 "c": req.computer, "u": req.user, "p": req.profile,
                 "day": a["day"], "url": a["url"], "title": a["title"],
@@ -156,6 +227,19 @@ def process_ingest(conn, req: IngestRequest) -> IngestResponse:
             cur.execute(upsert_state, {
                 "c": req.computer, "u": req.user, "p": req.profile, "v": max_id,
             })
+
+        # agent diagnostics (what it sees in each Edge profile) and executed commands
+        for d in req.diag:
+            cur.execute(upsert_status, {
+                "c": req.computer, "u": req.user, "p": (d.profile or "")[:128],
+                "ver": (req.agent_version or "")[:32] or None,
+                "hm": _local_dt(d.history_mtime, tz) if d.history_mtime else None,
+                "mid": d.max_visit_id,
+                "vt": _local_dt(d.max_visit_ts, tz) if d.max_visit_ts else None,
+                "rows": d.rows_read, "err": (d.error or "")[:256] or None,
+            })
+        for cmd_id in req.acked[:50]:
+            cur.execute(ack_command, {"id": cmd_id, "c": req.computer, "u": req.user})
 
         cur.execute(upsert_device, {"c": req.computer})
 

@@ -20,12 +20,26 @@ class WindowSample(BaseModel):
     window: str | None = None
 
 
+class DiagProfile(BaseModel):
+    """What the agent saw in one Edge profile at its last history read (diagnostics)."""
+    profile: str
+    history_mtime: int | None = None   # epoch s: last write of the History file
+    max_visit_id: int | None = None    # MAX(visits.id) in the copy of History
+    max_visit_ts: int | None = None    # epoch s: newest visit in the copy of History
+    rows_read: int = 0                 # visits read in the last cycle
+    error: str | None = None
+
+
 class IngestRequest(BaseModel):
     computer: str
     user: str
     profile: str
     visits: list[Visit] = Field(default_factory=list)
     windows: list[WindowSample] = Field(default_factory=list)
+    # since 2026.11.06.8, all optional (older agents do not send them)
+    agent_version: str | None = None
+    diag: list[DiagProfile] = Field(default_factory=list)
+    acked: list[int] = Field(default_factory=list)   # ids of executed cfg.AgentCommand rows
 
 
 # ---------- responses ----------
@@ -34,6 +48,10 @@ class ConfigResponse(BaseModel):
     enabled: bool
     settings: dict[str, int]
     last_visit_id: dict[str, int]
+    # since 2026.11.06.8: where the agent resumes reading history, and pending commands
+    since: dict[str, int] = Field(default_factory=dict)
+    commands: list[dict] = Field(default_factory=list)
+    server_time: int = 0
 
 
 class IngestResponse(BaseModel):

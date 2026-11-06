@@ -3,6 +3,30 @@
 All notable changes to this project are documented here.
 Versions are date-based: `YYYY.MM.DD.N`.
 
+## 2026.11.06.8
+
+History is resumed by TIME, decided by the server; the agent keeps no cursor. Fixes Edge history silently stopping for an account (LEGION\vvojc, 25.10 - 06.11.2026).
+
+### Why
+The agent resumed from Edge's `visits.id`, kept both in a file on the PC and in `dbo.IngestState`. When Edge rebuilds its History file the ids start again, so the stored id is higher than every new visit and nothing is read again - silently, with nothing in the log. Fixing it meant editing files on the child's PC.
+
+### Added
+- `dbo.BrowsingVisit`: one row per visit stored (account, profile, time, URL hash). A visit is new when it has no row yet, so reading the same visits twice is harmless (idempotent, no `VisitCount` double counting).
+- `GET /config` returns `since` (newest visit per profile, unix seconds), `commands` and `server_time`. The agent resumes from `since` minus `history_overlap_sec` (default 900), keeps the position in memory only, and re-reads from the last position every cycle.
+- `cfg.AgentCommand` + command `backfill`: queued in SQL (`sql/agent_commands.sql`), picked up by the agent within a cycle, confirmed in its next `POST /ingest` (`acked`). Re-reads the last N days (`Arg`, default setting `backfill_days` = 7), at most `max_backfill` newest visits. Nothing is done on the PC.
+- `dbo.AgentStatus`: what each agent reports per Edge profile (`agent_version`, `diag`: History file time, newest visit in it, rows read, last error). Lets the server see "the file has newer visits than were stored".
+- Settings `history_overlap_sec` (900) and `backfill_days` (7); `.env` key `FBL_VISIT_DEDUP_DAYS` (60, `0` = keep all) for how long `dbo.BrowsingVisit` rows are kept.
+- Agent: an Edge profile with no History file or a failing read is now logged and reported instead of silently skipped.
+
+### Changed
+- The agent no longer uses `state\cursor_*.txt` (old files are ignored and can be deleted). `IngestState.LastVisitId` is still maintained for agents older than this version but is not used to decide what is new.
+- A profile that already had data before this version gets a marker row in `dbo.BrowsingVisit`: visits up to its newest stored visit count as already ingested, so the upgrade does not count them twice.
+
+### Notes
+- Upgrade order: run `server-python/sql/upgrade_2026.11.06.8.sql`, deploy the server, then update the agents (`server-python/README.md`, *Upgrading to 2026.11.06.8*). A new agent against an old server waits (it needs `since`); old agents keep working against the new server.
+- Two visits of the same URL in the same second count as one.
+- Not verified: the exact cause of the stopped history for `LEGION\vvojc` (its History file cannot be read from the server); the agent was not run on Windows before this release (tested: server logic with unit tests, the read-position algorithm in a simulation).
+
 ## 2026.10.30.7
 
 Usage: technical windows can be left out.

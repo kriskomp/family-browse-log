@@ -12,6 +12,8 @@
 #      [0] = base URL of the endpoint   [1] = API token
 # =====================================================================
 
+$agentVersion = '2026.11.06.8'
+
 Start-Sleep -Seconds 20
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -25,8 +27,9 @@ $stateDir = Join-Path $base "state"
 
 # Everything that belongs to one Windows account is suffixed with this key
 # (e.g. LEGION_vvojc). Several accounts may run their agent on the same PC and
-# in the same folder, so each account gets its own log, queue, cursors and
-# temp copy of History. The ONLY shared file is settings.dat (read-only config).
+# in the same folder, so each account gets its own log, queue and
+# temp copy of History. There are NO cursor files any more: where to resume reading
+# history is decided by the server (GET /config -> since) and kept only in memory. The ONLY shared file is settings.dat (read-only config).
 $userKey  = ("$env:USERDOMAIN\$env:USERNAME") -replace '[^A-Za-z0-9]', '_'
 $logFile  = Join-Path $base ("monitor_log_" + $userKey + ".txt")
 $queueDir = Join-Path $stateDir ("queue_" + $userKey)
@@ -100,6 +103,8 @@ $settings = @{
     block_size        = 500
     max_backfill      = 3000
     idle_limit_sec    = 300
+    history_overlap_sec = 900    # czytaj od (punkt wznowienia - overlap); serwer odrzuca duplikaty
+    backfill_days     = 7        # nowy profil / polecenie 'backfill': tyle dni wstecz
     window_all        = 0        # 0 = tylko aktywne okno (zalecane), 1 = wszystkie okna (jak v1)
 }
 
@@ -203,81 +208,111 @@ function Get-EdgeProfiles {
     return $res
 }
 
-# Reads new visits (v.id > cursor) from a COPY of the History db (avoids the
-# lock held by a running Edge). Returns up to $limit rows ordered by id.
-function Read-EdgeHistory($historyPath, $cursor, $limit) {
-    $rows = [System.Collections.Generic.List[object]]::new()
-    $tmp  = Join-Path $stateDir ("tmp_hist_" + $userKey + ".db")
+# WebKit microseconds (since 1601) <-> unix epoch seconds
+function New-Pos([int64]$epochSec) {
+    # id = MaxValue switches the "id > pos.id" part of the query off until a batch sets it
+    return @{ vt = (($epochSec + 11644473600L) * 1000000L); id = [int64]::MaxValue }
+}
+
+function New-ReadResult {
+    return [PSCustomObject]@{
+        rows = [System.Collections.Generic.List[object]]::new()
+        maxId = [int64]0; maxVt = [int64]0          # of the rows returned (WebKit us)
+        dbMaxId = [int64]0; dbMaxVt = [int64]0      # of the whole History file (diagnostics)
+        error = $null
+    }
+}
+
+# Reads visits from a COPY of the History db (avoids the lock held by a running Edge):
+#   rows with visit_time > $pos.vt  OR  id > $pos.id, oldest first, at most $limit.
+# $cap > 0 (new profile / backfill): start no further back than the $cap newest visits.
+# Edge's visits.id is NOT trusted as a resume point (it restarts when Edge rebuilds History):
+# the position is time based, the server de-duplicates what is read twice.
+function Read-EdgeHistory($historyPath, $pos, $limit, $cap) {
+    $res = New-ReadResult
+    $tmp = Join-Path $stateDir ("tmp_hist_" + $userKey + ".db")
     try {
         # Remove the previous copy (and its -wal/-shm) first: a stale WAL left over
         # from another Edge profile must never be applied to this profile's copy.
         foreach ($t in @($tmp, ($tmp + "-wal"), ($tmp + "-shm"))) {
             Remove-Item $t -Force -ErrorAction SilentlyContinue
         }
-        Copy-Item $historyPath $tmp -Force
+        Copy-Item $historyPath $tmp -Force -ErrorAction Stop
         foreach ($ext in @("-wal","-shm")) {
             if (Test-Path ($historyPath + $ext)) { Copy-Item ($historyPath + $ext) ($tmp + $ext) -Force }
         }
     }
-    catch { LogError "Kopia historii nieudana: $($_.Exception.Message)"; return $rows }
+    catch { $res.error = "copy failed: $($_.Exception.Message)"; return $res }
 
     $db = [IntPtr]::Zero
     if ($SQLite::sqlite3_open_v2($tmp, [ref]$db, 0x02, [IntPtr]::Zero) -ne 0) {   # 0x02 = READWRITE (copy)
-        LogError "Nie mozna otworzyc kopii historii (open_v2)"; return $rows
+        $res.error = "open_v2 failed"; return $res
     }
 
-    # first run (cursor 0): limit initial backfill to max_backfill newest visits
-    $effCursor = $cursor
-    $maxBackfill = [int]$settings.max_backfill
-    if ($cursor -eq 0 -and $maxBackfill -gt 0) {
+    # diagnostics: newest id / visit_time in the whole file
+    $st0 = [IntPtr]::Zero
+    if ($SQLite::sqlite3_prepare_v2($db, "SELECT CAST(MAX(id) AS TEXT), CAST(MAX(visit_time) AS TEXT) FROM visits;", -1, [ref]$st0, [ref][IntPtr]::Zero) -eq 0) {
+        if ($SQLite::sqlite3_step($st0) -eq 100) {
+            $x = [int64]0; [int64]::TryParse((PtrToUtf8 ($SQLite::sqlite3_column_text($st0,0))), [ref]$x) | Out-Null; $res.dbMaxId = $x
+            $x = [int64]0; [int64]::TryParse((PtrToUtf8 ($SQLite::sqlite3_column_text($st0,1))), [ref]$x) | Out-Null; $res.dbMaxVt = $x
+        }
+        $null = $SQLite::sqlite3_finalize($st0)
+    }
+
+    $vt = [int64]$pos.vt
+    $id = [int64]$pos.id
+    if ($cap -gt 0) {
         $st2 = [IntPtr]::Zero
-        if ($SQLite::sqlite3_prepare_v2($db, "SELECT CAST(MAX(id) AS TEXT) FROM visits;", -1, [ref]$st2, [ref][IntPtr]::Zero) -eq 0) {
+        $capQ = "SELECT CAST(visit_time AS TEXT) FROM visits ORDER BY visit_time DESC LIMIT 1 OFFSET " + ([int]$cap - 1) + ";"
+        if ($SQLite::sqlite3_prepare_v2($db, $capQ, -1, [ref]$st2, [ref][IntPtr]::Zero) -eq 0) {
             if ($SQLite::sqlite3_step($st2) -eq 100) {
-                $mxTxt = PtrToUtf8 ($SQLite::sqlite3_column_text($st2,0))
-                $mx = [int64]0; [int64]::TryParse($mxTxt, [ref]$mx) | Out-Null
-                if ($mx -gt $maxBackfill) { $effCursor = $mx - $maxBackfill }
+                $c = [int64]0; [int64]::TryParse((PtrToUtf8 ($SQLite::sqlite3_column_text($st2,0))), [ref]$c) | Out-Null
+                if (($c - 1) -gt $vt) { $vt = $c - 1 }
             }
             $null = $SQLite::sqlite3_finalize($st2)
         }
+        $id = [int64]::MaxValue
     }
 
-    # visit_time: WebKit microseconds since 1601 -> unix epoch seconds
-    $q = "SELECT CAST(v.id AS TEXT), u.url, u.title, CAST((v.visit_time/1000000 - 11644473600) AS TEXT) " +
+    # columns: id, url, title, visit_time as unix seconds, raw visit_time (WebKit us)
+    $q = "SELECT CAST(v.id AS TEXT), u.url, u.title, CAST((v.visit_time/1000000 - 11644473600) AS TEXT), CAST(v.visit_time AS TEXT) " +
          "FROM visits v JOIN urls u ON u.id = v.url " +
-         "WHERE v.id > $effCursor ORDER BY v.id LIMIT $limit;"
+         "WHERE (v.visit_time > $vt OR v.id > $id) ORDER BY v.visit_time, v.id LIMIT $limit;"
 
     $stmt = [IntPtr]::Zero
     if ($SQLite::sqlite3_prepare_v2($db, $q, -1, [ref]$stmt, [ref][IntPtr]::Zero) -ne 0) {
-        $null = $SQLite::sqlite3_close($db); LogError "Blad zapytania historii (prepare_v2)"; return $rows
+        $null = $SQLite::sqlite3_close($db); $res.error = "prepare_v2 failed"; return $res
     }
     while ($SQLite::sqlite3_step($stmt) -eq 100) {
         $vid = PtrToUtf8 ($SQLite::sqlite3_column_text($stmt,0))
         $url = PtrToUtf8 ($SQLite::sqlite3_column_text($stmt,1))
         $ttl = PtrToUtf8 ($SQLite::sqlite3_column_text($stmt,2))
         $ts  = PtrToUtf8 ($SQLite::sqlite3_column_text($stmt,3))
+        $raw = PtrToUtf8 ($SQLite::sqlite3_column_text($stmt,4))
         $vv = [int64]0; [int64]::TryParse($vid, [ref]$vv) | Out-Null
         $tt = [int64]0; [int64]::TryParse($ts,  [ref]$tt) | Out-Null
-        $rows.Add([PSCustomObject]@{ visit_id = $vv; url = $url; title = $ttl; ts = $tt }) | Out-Null
+        $rr = [int64]0; [int64]::TryParse($raw, [ref]$rr) | Out-Null
+        $res.rows.Add([PSCustomObject]@{ visit_id = $vv; url = $url; title = $ttl; ts = $tt }) | Out-Null
+        if ($vv -gt $res.maxId) { $res.maxId = $vv }
+        if ($rr -gt $res.maxVt) { $res.maxVt = $rr }
     }
     $null = $SQLite::sqlite3_finalize($stmt)
     $null = $SQLite::sqlite3_close($db)
-    return $rows
+    return $res
 }
 
-# --- local cursor (max visit_id already queued) per Windows account AND Edge profile ---
-# The file name contains the account, so several children's accounts on one PC
-# (same state\ folder) never share a cursor. Before this fix all accounts used
-# cursor_<profile>.txt, so one account's cursor hid another account's visits.
-function Get-CursorFile($profile) { Join-Path $stateDir ("cursor_" + $userKey + "_" + $profile + ".txt") }
-function Get-Cursor($profile) {
-    $f = Get-CursorFile $profile
-    $v = [int64]0
-    if (Test-Path $f) { [int64]::TryParse((Get-Content $f -Raw).Trim(), [ref]$v) | Out-Null }
-    return $v
-}
-function Set-Cursor($profile, $value) {
-    Set-Content -Path (Get-CursorFile $profile) -Value $value
-}
+# Where to read from, per Edge profile. Lives in memory only; after a restart it is rebuilt
+# from the server (GET /config -> since). Nothing about it is stored on this PC.
+$script:readPos      = @{}      # profile -> @{ vt = WebKit us; id = visits.id }
+$script:since        = @{}      # profile -> unix seconds of the newest visit the server has
+$script:cfgOk        = $false   # GET /config answered with a resume point (new server)
+$script:cfgWarned    = $false
+$script:backfillDays = 0        # > 0 = a 'backfill' command is being executed
+$script:handledCmds  = @{}      # command ids already acted on (the server resends until acked)
+$script:cmdToAck     = @()      # ids received, acknowledged after the backfill was read
+$script:ackIds       = @()      # ids to confirm with the next block
+$script:diag         = @()      # per-profile diagnostics for the next block
+$script:lastDiagSent = [DateTime]::MinValue
 
 # =====================================================================
 # HTTP
@@ -299,6 +334,17 @@ function Post-Ingest($payloadObj) {
 $script:seq = 0
 function Enqueue($payloadObj) {
     if ($null -eq $payloadObj) { return }   # never write an empty block to the queue
+    # piggy-back diagnostics and command confirmations on this block
+    $payloadObj | Add-Member -NotePropertyName agent_version -NotePropertyValue $agentVersion -Force
+    if (@($script:diag).Count -gt 0) {
+        $payloadObj | Add-Member -NotePropertyName diag -NotePropertyValue @($script:diag) -Force
+        $script:diag = @()
+        $script:lastDiagSent = Get-Date
+    }
+    if (@($script:ackIds).Count -gt 0) {
+        $payloadObj | Add-Member -NotePropertyName acked -NotePropertyValue @($script:ackIds) -Force
+        $script:ackIds = @()
+    }
     $script:seq++
     # UTC, so the name order never goes backwards when the local clock is turned back
     # (end of DST) - blocks must reach the server oldest first (window sessions rely on it)
@@ -364,21 +410,45 @@ while ($true) {
         try {
             $rc = Get-RemoteConfig
             $enabled = [bool]$rc.enabled
-            # Only process settings/cursors when enabled. An excluded user gets
-            # enabled:false with empty settings/last_visit_id objects, whose
-            # .PSObject.Properties.Name is $null - skipping avoids touching them.
+            # Only process settings when enabled. An excluded user gets
+            # enabled:false with empty settings, whose .PSObject.Properties.Name is $null.
             if ($enabled) {
                 if ($rc.settings) {
                     $sNames = @($rc.settings.PSObject.Properties.Name) | Where-Object { $_ }
                     foreach ($k in $sNames) { $settings[$k] = [int]$rc.settings.$k }
                 }
-                # align local cursor to server's last_visit_id (server is source of truth)
-                if ($rc.last_visit_id) {
-                    $pNames = @($rc.last_visit_id.PSObject.Properties.Name) | Where-Object { $_ }
-                    foreach ($p in $pNames) {
-                        $srv = [int64]$rc.last_visit_id.$p
-                        if ($srv -gt (Get-Cursor $p)) { Set-Cursor $p $srv }
+                # resume point per profile (unix seconds). An old server has no `since`:
+                # history reading then waits (visit ids are no longer used) - update the server.
+                if ($rc.PSObject.Properties.Name -contains 'since') {
+                    $script:cfgOk = $true
+                    $script:since = @{}
+                    if ($rc.since) {
+                        foreach ($p in (@($rc.since.PSObject.Properties.Name) | Where-Object { $_ })) {
+                            $script:since[$p] = [int64]$rc.since.$p
+                        }
                     }
+                    # commands queued on the server (e.g. backfill); the server resends them
+                    # until we confirm, so remember which ones we already acted on
+                    foreach ($c in @($rc.commands)) {
+                        if ($null -eq $c -or $script:handledCmds.ContainsKey([int64]$c.id)) { continue }
+                        $script:handledCmds[[int64]$c.id] = $true
+                        if ($c.command -eq 'backfill') {
+                            $days = [int]$settings.backfill_days
+                            if ($c.arg) { $days = [int]$c.arg }
+                            if ($days -lt 1) { $days = 1 }
+                            $script:backfillDays = $days
+                            $script:cmdToAck += [int64]$c.id
+                            LogInfo "Polecenie z serwera: backfill $days dni (id=$($c.id))"
+                        }
+                        else {
+                            $script:ackIds += [int64]$c.id      # unknown command: confirm, do nothing
+                            LogInfo "Nieznane polecenie '$($c.command)' (id=$($c.id)) pominiete"
+                        }
+                    }
+                }
+                elseif (-not $script:cfgWarned) {
+                    $script:cfgWarned = $true
+                    LogError "Serwer nie zwraca 'since' (stara wersja) - czytanie historii wstrzymane do aktualizacji serwera"
                 }
             }
         }
@@ -416,29 +486,95 @@ while ($true) {
         }
 
         # 3) read new Edge history into queue (every history_read_sec).
-        #    Drains backfill in consecutive blocks until caught up (block < block_size),
-        #    instead of one block per cycle.
-        if (($now - $lastHistory).TotalSeconds -ge [int]$settings.history_read_sec) {
+        #    Drains in consecutive blocks until caught up (block < block_size).
+        #    Waits until GET /config gave a resume point: never guess where to start.
+        if ($script:cfgOk -and (($now - $lastHistory).TotalSeconds -ge [int]$settings.history_read_sec)) {
             $lastHistory = $now
             $attachedWindows = $false
-            $bs = [int]$settings.block_size
-            foreach ($p in (Get-EdgeProfiles)) {
-                while ($true) {
-                    $cursor = Get-Cursor $p.FolderName
-                    $visits = Read-EdgeHistory $p.HistoryPath $cursor $bs
-                    if ($visits.Count -eq 0) { break }
+            $bs        = [int]$settings.block_size
+            $overlap   = [int64]$settings.history_overlap_sec
+            $nowEpoch  = [int64][Math]::Floor(([DateTimeOffset](Get-Date)).ToUnixTimeSeconds())
+            $profiles  = @(Get-EdgeProfiles)
+            $diagList  = @()
+            $hadError  = $false
+            $queuedAny = $false
+            if ($profiles.Count -eq 0) {
+                $diagList += [PSCustomObject]@{ profile = "(none)"; error = "no Edge profile with a History file found" }
+                $hadError = $true
+            }
+            foreach ($p in $profiles) {
+                $name = $p.FolderName
+                $cap  = 0
+                if ($script:backfillDays -gt 0) {
+                    # command from the server: read the last N days again (server skips what it has)
+                    $script:readPos[$name] = New-Pos ($nowEpoch - [int64]$script:backfillDays * 86400)
+                    $cap = [int]$settings.max_backfill
+                }
+                elseif (-not $script:readPos.ContainsKey($name)) {
+                    if ($script:since.ContainsKey($name)) {
+                        $script:readPos[$name] = New-Pos ($script:since[$name] - $overlap)
+                    }
+                    else {   # profile the server has never seen
+                        $script:readPos[$name] = New-Pos ($nowEpoch - [int64]$settings.backfill_days * 86400)
+                        $cap = [int]$settings.max_backfill
+                    }
+                }
+                $total = 0; $err = $null; $info = $null
+                for ($iter = 0; $iter -lt 20; $iter++) {
+                    $pos = $script:readPos[$name]
+                    $r = Read-EdgeHistory $p.HistoryPath $pos $bs $cap
+                    $cap = 0
+                    $info = $r
+                    if ($r.error) { $err = $r.error; break }
+                    $n = $r.rows.Count
+                    if ($n -eq 0) { break }
                     $wins = @()
                     if (-not $attachedWindows) { $wins = @($windowBuffer); $attachedWindows = $true }
                     Enqueue ([PSCustomObject]@{
-                        computer = $komputer; user = $user; profile = $p.FolderName
-                        visits = @($visits); windows = $wins
+                        computer = $komputer; user = $user; profile = $name
+                        visits = @($r.rows); windows = $wins
                     })
-                    Set-Cursor $p.FolderName ([int64]($visits[$visits.Count-1].visit_id))
-                    LogInfo "Zakolejkowano $($visits.Count) wizyt [$($p.FolderName)]"
-                    if ($visits.Count -lt $bs) { break }   # dogonilismy biezacy stan
+                    $queuedAny = $true
+                    # advance: newest time / id seen. A FULL block may have cut a group of
+                    # visits with the same time, so step back 1 us (the server skips repeats).
+                    $newVt = $r.maxVt
+                    if ($n -ge $bs -and ($newVt - 1) -gt [int64]$pos.vt) { $newVt = $newVt - 1 }
+                    if ([int64]$pos.vt -gt $newVt) { $newVt = [int64]$pos.vt }
+                    $newId = $r.maxId
+                    if ([int64]$pos.id -ne [int64]::MaxValue -and [int64]$pos.id -gt $newId) { $newId = [int64]$pos.id }
+                    $script:readPos[$name] = @{ vt = $newVt; id = $newId }
+                    $total += $n
+                    LogInfo "Zakolejkowano $n wizyt [$name]"
+                    if ($n -lt $bs) { break }   # caught up
+                }
+                if ($err) { $hadError = $true; LogError "Historia [$name]: $err" }
+                $mtime = $null
+                try { $mtime = [int64][Math]::Floor(([DateTimeOffset](Get-Item $p.HistoryPath).LastWriteTimeUtc).ToUnixTimeSeconds()) } catch { }
+                $dbVt = $null
+                if ($info -and $info.dbMaxVt -gt 0) { $dbVt = [int64][Math]::Floor($info.dbMaxVt / 1000000) - 11644473600L }
+                $diagList += [PSCustomObject]@{
+                    profile = $name; history_mtime = $mtime
+                    max_visit_id = $(if ($info) { $info.dbMaxId } else { $null })
+                    max_visit_ts = $dbVt; rows_read = $total; error = $err
                 }
             }
             if ($attachedWindows) { $windowBuffer.Clear() }
+            if ($script:backfillDays -gt 0) {
+                $script:backfillDays = 0
+                $script:ackIds += @($script:cmdToAck); $script:cmdToAck = @()
+            }
+            $script:diag = $diagList
+            # diagnostics ride on the next block; send a block of their own when there is
+            # something to say (error / command confirmation) or every 10 minutes
+            if ($hadError -or @($script:ackIds).Count -gt 0 -or
+                    (($now - $script:lastDiagSent).TotalSeconds -ge 600)) {
+                $fp = ($profiles | Select-Object -First 1).FolderName
+                if (-not $fp) { $fp = "Default" }
+                Enqueue ([PSCustomObject]@{
+                    computer = $komputer; user = $user; profile = $fp
+                    visits = @(); windows = @()
+                })
+            }
         }
 
         # 4) push: flush queue; if only windows pending, send a windows-only block

@@ -1,7 +1,7 @@
 """family-browse-log server (FastAPI).
 
 Endpoints (see ../docs/api.md):
-    GET  /config    - agent: per-agent settings + resume state        (agent token)
+    GET  /config    - agent: settings, where to resume history, commands (agent token)
     POST /ingest    - agent: receive a block of visits + windows       (agent token)
     GET  /users     - reader: accounts with data, for the HA picker    (reader token)
     GET  /activity  - reader: newest web + window activity             (reader token)
@@ -10,6 +10,7 @@ Endpoints (see ../docs/api.md):
 from __future__ import annotations
 
 import secrets
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -74,13 +75,18 @@ def get_config(
     user: str = Query(...),
     _=Depends(require_agent),
 ) -> ConfigResponse:
+    tz = ZoneInfo(get_settings().local_tz)
     with db.connect() as conn:
         cur = conn.cursor()
         if db.is_excluded(cur, computer, user):
-            return ConfigResponse(enabled=False, settings={}, last_visit_id={})
+            return ConfigResponse(enabled=False, settings={}, last_visit_id={},
+                                  server_time=int(time.time()))
         settings = db.resolve_settings(cur, computer, user)
         last = db.get_last_visit_ids(cur, computer, user)
-    return ConfigResponse(enabled=True, settings=settings, last_visit_id=last)
+        since = db.get_visit_since(cur, computer, user, tz)
+        commands = db.get_pending_commands(cur, computer, user)
+    return ConfigResponse(enabled=True, settings=settings, last_visit_id=last,
+                          since=since, commands=commands, server_time=int(time.time()))
 
 
 @app.post("/ingest", response_model=IngestResponse)

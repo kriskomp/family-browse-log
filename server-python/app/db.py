@@ -8,10 +8,12 @@ from __future__ import annotations
 import contextlib
 from datetime import date, datetime, timedelta
 from typing import Iterator
+from zoneinfo import ZoneInfo
 
 import pymssql
 
 from .config import get_settings
+from .visits import ZERO_HASH, local_epoch
 
 # default settings, used if a key is missing from cfg.Setting
 DEFAULT_SETTINGS: dict[str, int] = {
@@ -21,6 +23,12 @@ DEFAULT_SETTINGS: dict[str, int] = {
     "block_size": 500,
     "max_backfill": 3000,
     "idle_limit_sec": 300,
+    # history is read from (resume point - overlap), so a visit committed late is not
+    # missed; the server de-duplicates what is read twice
+    "history_overlap_sec": 900,
+    # a profile the server has never seen (or a 'backfill' command) is read this far back,
+    # at most max_backfill newest visits
+    "backfill_days": 7,
 }
 
 
@@ -93,6 +101,83 @@ def get_last_visit_ids(cur, computer: str, user: str) -> dict[str, int]:
         (computer, user),
     )
     return {row[0]: int(row[1]) for row in cur.fetchall()}
+
+
+def _object_exists(cur, name: str) -> bool:
+    """True when a table exists - the read side keeps working before the upgrade SQL ran."""
+    cur.execute("SELECT CASE WHEN OBJECT_ID(%s,'U') IS NULL THEN 0 ELSE 1 END", (name,))
+    return bool(cur.fetchone()[0])
+
+
+def get_visit_since(cur, computer: str, user: str, tz: ZoneInfo) -> dict[str, int]:
+    """EdgeProfile -> epoch seconds (UTC) of the newest visit the server has.
+
+    This is where the agent resumes reading history (minus the overlap). It comes from
+    dbo.BrowsingVisit; a profile that has no per-visit rows yet (data from before that
+    table existed) falls back to the newest LastVisit in dbo.BrowsingHistory.
+    """
+    since: dict[str, int] = {}
+    if _object_exists(cur, "dbo.BrowsingVisit"):
+        cur.execute(
+            """
+            SELECT EdgeProfile, MAX(VisitTs) FROM dbo.BrowsingVisit
+            WHERE Computer = %s AND UserAccount = %s GROUP BY EdgeProfile
+            """,
+            (computer, user),
+        )
+        since = {r[0]: int(r[1]) for r in cur.fetchall() if r[1] is not None}
+    cur.execute(
+        """
+        SELECT EdgeProfile, MAX(LastVisit) FROM dbo.BrowsingHistory
+        WHERE Computer = %s AND UserAccount = %s GROUP BY EdgeProfile
+        """,
+        (computer, user),
+    )
+    for profile, last in cur.fetchall():
+        if profile not in since and last is not None:
+            since[profile] = local_epoch(last, tz)
+    return since
+
+
+def get_visit_cutoff(cur, computer: str, user: str, profile: str,
+                     tz: ZoneInfo) -> tuple[int | None, bool]:
+    """(cutoff, create_marker): up to which time a profile's visits were already counted
+    by a server version without per-visit rows.
+
+    The cutoff is kept for good as a MARKER row in dbo.BrowsingVisit (VisitTs = the newest
+    visit stored at that moment, UrlHash all zeros), created by the first ingest of a profile
+    that has data but no per-visit rows. A profile first seen after the upgrade has no cutoff.
+    """
+    where = "Computer = %s AND UserAccount = %s AND EdgeProfile = %s"
+    args = (computer, user, profile)
+    cur.execute(f"SELECT VisitTs FROM dbo.BrowsingVisit WHERE {where} "
+                f"AND UrlHash = CONVERT(BINARY(32), '{ZERO_HASH}', 2)", args)
+    row = cur.fetchone()
+    if row is not None:
+        return int(row[0]), False
+    cur.execute(f"SELECT TOP 1 1 FROM dbo.BrowsingVisit WHERE {where}", args)
+    if cur.fetchone() is not None:
+        return None, False          # rows exist and no marker: a profile born after the upgrade
+    cur.execute(f"SELECT MAX(LastVisit) FROM dbo.BrowsingHistory WHERE {where}", args)
+    row = cur.fetchone()
+    if row and row[0] is not None:
+        return local_epoch(row[0], tz), True
+    return None, False
+
+
+def get_pending_commands(cur, computer: str, user: str) -> list[dict]:
+    """Commands queued for this account in cfg.AgentCommand and not acknowledged yet."""
+    if not _object_exists(cur, "cfg.AgentCommand"):
+        return []
+    cur.execute(
+        """
+        SELECT Id, Command, Arg FROM cfg.AgentCommand
+        WHERE AckedAt IS NULL AND Computer = %s AND UserAccount = %s ORDER BY Id
+        """,
+        (computer, user),
+    )
+    return [{"id": int(r[0]), "command": r[1], "arg": int(r[2]) if r[2] is not None else None}
+            for r in cur.fetchall()]
 
 
 def get_last_visit_id_for_profile(cur, computer: str, user: str, profile: str) -> int:
