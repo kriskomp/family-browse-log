@@ -99,7 +99,10 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_WindowActivity_session
         INCLUDE (EndTime);
 GO
 
-/* Resume state - last processed Edge visit id per (Computer, UserAccount, EdgeProfile). */
+/* Legacy resume state - last processed Edge visit id per (Computer, UserAccount, EdgeProfile).
+   Since 2026.11.06.8 it is NOT used to decide what is new (Edge restarts its ids when it
+   rebuilds a History file, which silently blocked a profile for good); it is only served to
+   older agents by GET /config and kept for diagnostics. See dbo.BrowsingVisit. */
 IF OBJECT_ID('dbo.IngestState','U') IS NULL
 BEGIN
     CREATE TABLE dbo.IngestState (
@@ -108,6 +111,50 @@ BEGIN
         EdgeProfile NVARCHAR(128) NOT NULL,
         LastVisitId BIGINT        NOT NULL,
         CONSTRAINT PK_IngestState PRIMARY KEY (Computer, UserAccount, EdgeProfile)
+    );
+END
+GO
+
+/* One small row per ingested visit: (account, profile, time of the visit, hash of the URL).
+   A visit already in this table is never counted twice, so the agent may safely re-send
+   (read overlap, backfill, a lost ACK). The newest VisitTs per profile is the resume point
+   GET /config returns as `since`. Rows older than FBL_VISIT_DEDUP_DAYS (default 60) are
+   purged by the write path. VisitTs = epoch seconds UTC. */
+IF OBJECT_ID('dbo.BrowsingVisit','U') IS NULL
+BEGIN
+    CREATE TABLE dbo.BrowsingVisit (
+        Id          BIGINT IDENTITY(1,1) NOT NULL,
+        Computer    NVARCHAR(64)  NOT NULL,
+        UserAccount NVARCHAR(128) NOT NULL,
+        EdgeProfile NVARCHAR(128) NOT NULL,
+        VisitTs     BIGINT        NOT NULL,
+        UrlHash     BINARY(32)    NOT NULL,
+        CONSTRAINT PK_BrowsingVisit PRIMARY KEY CLUSTERED (Id DESC)
+    );
+    CREATE UNIQUE INDEX UX_BrowsingVisit_key
+        ON dbo.BrowsingVisit (Computer, UserAccount, EdgeProfile, VisitTs, UrlHash);
+END
+GO
+
+/* What the agent reports about each Edge profile (diagnostics, one row per profile, updated
+   by every block that carries the agent's `diag`). HistoryMtime = last write of the History
+   file, MaxVisitTime = newest visit in it, MaxVisitId = Edge's MAX(visits.id), RowsRead = visits
+   read in its last cycle, LastError = last problem it had opening or reading the profile.
+   Times are local (like the rest of the database). */
+IF OBJECT_ID('dbo.AgentStatus','U') IS NULL
+BEGIN
+    CREATE TABLE dbo.AgentStatus (
+        Computer     NVARCHAR(64)  NOT NULL,
+        UserAccount  NVARCHAR(128) NOT NULL,
+        EdgeProfile  NVARCHAR(128) NOT NULL,
+        ReportedAt   DATETIME2(7)  NOT NULL,
+        AgentVersion NVARCHAR(32)  NULL,
+        HistoryMtime DATETIME2(7)  NULL,
+        MaxVisitId   BIGINT        NULL,
+        MaxVisitTime DATETIME2(7)  NULL,
+        RowsRead     INT           NOT NULL CONSTRAINT DF_AgentStatus_RowsRead DEFAULT 0,
+        LastError    NVARCHAR(256) NULL,
+        CONSTRAINT PK_AgentStatus PRIMARY KEY (Computer, UserAccount, EdgeProfile)
     );
 END
 GO
@@ -166,6 +213,28 @@ BEGIN
 END
 GO
 
+/* Commands for one account on one PC, delivered by GET /config and acknowledged by the agent
+   in its next POST /ingest (`acked`). So a child's agent can be corrected from the server while
+   the child uses the PC. Command 'backfill' (Arg = days, default setting backfill_days): read
+   history again from that far back, at most max_backfill newest visits; what the server already
+   has is skipped. Queue one with sql/agent_commands.sql. */
+IF OBJECT_ID('cfg.AgentCommand','U') IS NULL
+BEGIN
+    CREATE TABLE cfg.AgentCommand (
+        Id          INT IDENTITY(1,1) NOT NULL,
+        Computer    NVARCHAR(64)  NOT NULL,
+        UserAccount NVARCHAR(128) NOT NULL,
+        Command     NVARCHAR(32)  NOT NULL,
+        Arg         INT           NULL,
+        CreatedAt   DATETIME2(7)  NOT NULL CONSTRAINT DF_AgentCommand_CreatedAt DEFAULT (SYSDATETIME()),
+        AckedAt     DATETIME2(7)  NULL,
+        CONSTRAINT PK_AgentCommand PRIMARY KEY CLUSTERED (Id DESC),
+        CONSTRAINT CK_AgentCommand_Command CHECK (Command IN ('backfill'))
+    );
+    CREATE INDEX IX_AgentCommand_pending ON cfg.AgentCommand (Computer, UserAccount, AckedAt);
+END
+GO
+
 /* People: link the accounts of one person across PCs (read API: GET /persons, /usage).
    UserName is the login WITHOUT the computer part (LEGION\anna -> anna), so one row
    covers that login on every PC. Computer set = only on that PC (wins over a row
@@ -199,6 +268,8 @@ USING (VALUES
     ('block_size',        '500'),
     ('max_backfill',      '3000'),
     ('idle_limit_sec',    '300'),
+    ('history_overlap_sec', '900'),  -- history is read from (resume point - this), duplicates are skipped
+    ('backfill_days',     '7'),      -- new profile / 'backfill' command: read this many days back
     ('window_all',        '0')     -- 0 = only the active window (recommended), 1 = all windows (v1 behaviour)
 ) AS s (SettingKey, SettingValue)
     ON  t.Scope = 'global'

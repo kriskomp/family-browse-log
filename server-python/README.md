@@ -55,6 +55,27 @@ GRANT SELECT ON cfg.ExcludedUser    TO [<login>];
 GRANT SELECT ON cfg.Person          TO [<login>];   -- since 2026.10.28.6 (persons, usage)
 ```
 
+## Upgrading to 2026.11.06.8 (history resumed by time, server-side commands)
+
+Order matters: **SQL, then server, then agents.**
+
+1. In CloudBeaver run `sql/upgrade_2026.11.06.8.sql` (idempotent, no `GO`, names are
+   qualified). It creates `dbo.BrowsingVisit`, `dbo.AgentStatus`, `cfg.AgentCommand` and
+   two settings; its last query shows `new_tables = 3`. Grant the service login
+   `SELECT, INSERT, UPDATE, DELETE` on `dbo.BrowsingVisit` and `dbo.AgentStatus`, and
+   `SELECT, UPDATE` on `cfg.AgentCommand`.
+2. Pull the code, restart the service (`systemctl restart family-browse-log`). Old agents keep
+   working. Optional `.env` key: `FBL_VISIT_DEDUP_DAYS` (default 60, `0` = keep all).
+3. Update `monitor.ps1` on each PC (restart the agent / log in again). It stops using
+   `state\cursor_*.txt`; the files are ignored and can be deleted.
+4. First ingest of an existing profile writes a marker row: visits up to its newest stored
+   visit count as already ingested, so nothing is counted twice.
+
+Recovering missing history without touching the PC: queue a command with
+`sql/agent_commands.sql` (`backfill`, N days). The agent picks it up within a cycle and
+confirms it; `sql/agent_commands.sql` also has queries for pending commands and for what
+each agent reports (`dbo.AgentStatus`). Details: `docs/api.md`.
+
 ## Upgrading to 2026.10.28.6 (persons and usage)
 
 1. Run `sql/schema.sql` (idempotent): it creates `cfg.Person`. Grant `SELECT` on it to the

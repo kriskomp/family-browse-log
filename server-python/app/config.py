@@ -59,6 +59,11 @@ class Settings:
             os.getenv("FBL_USAGE_IGNORE_TITLES", "Microsoft Family Safety").split(";")
             if t.strip())
 
+        # --- visit de-duplication: dbo.BrowsingVisit keeps one small row per ingested visit
+        # (account, profile, time, url hash) so a re-sent visit is never counted twice. Rows
+        # older than this many days are purged by the write path. 0 = never purge.
+        self.visit_dedup_days: int = int(os.getenv("FBL_VISIT_DEDUP_DAYS", "60"))
+
         # --- timezone used to derive the calendar Day from epoch timestamps ---
         self.local_tz: str = os.getenv("FBL_LOCAL_TZ", "Europe/Warsaw")
 

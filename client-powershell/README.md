@@ -39,12 +39,17 @@ folder anywhere — no hard-coded `C:\boot`.
 ## How it works
 
 1. **On each cycle** it calls `GET /config` → receives `enabled`, the settings
-   (`push_interval_sec`, `block_size`, …) and the authoritative `last_visit_id` per
-   Edge profile. If `enabled` is `false` (user excluded on the server) it idles.
+   (`push_interval_sec`, `block_size`, …), `since` (where to resume history per Edge
+   profile) and pending `commands` (e.g. `backfill`). If `enabled` is `false` (user excluded on the server) it idles.
 2. **History**: every `history_read_sec` it reads new Edge visits
-   (`visit_id > cursor`) in blocks of `block_size` from a copy of the `History`
-   database (so a running Edge doesn't block it). It drains the whole backlog in
-   consecutive blocks on first run, then only the increment.
+   in blocks of `block_size` from a copy of the `History` database (so a running Edge
+   doesn't block it). The position is a TIME kept in memory only (start: `since` from the
+   server minus `history_overlap_sec`; a profile the server never saw: `backfill_days`
+   back, at most `max_backfill` visits). The server skips what it already has, so
+   nothing is lost or counted twice when Edge restarts its ids or a visit is committed
+   late. Without a `since` in `/config` (old server) it waits. Each cycle it reports per
+   profile what it sees (History file time, newest visit, rows read, errors) in `diag`.
+   A `backfill` command queued on the server makes it re-read the last days.
 3. **Windows**: it samples the active (foreground) window when the user is active
    (one sample per `window_sample_sec`, each with its own time). The agent only sends
    samples; the **server** keeps one row per window per session (one row per browser per
@@ -65,7 +70,7 @@ folder anywhere — no hard-coded `C:\boot`.
 
    | What | File / place | Notes |
    |---|---|---|
-   | Edge history cursor | `state\cursor_<account>_<profile>.txt` | one per account and Edge profile |
+   | Edge history position | none (memory only) | resumed from the server; old `state\cursor_*.txt` files are unused and can be deleted |
    | Edge history copy (temp) | `state\tmp_hist_<account>.db` | read copy of that account's `History` |
    | Queue of blocks | `state\queue_<account>\*.json` | history visits **and** window (program) rows |
    | Log | `monitor_log_<account>.txt` (next to the script) | one log per account |
@@ -85,7 +90,7 @@ folder anywhere — no hard-coded `C:\boot`.
    active console session (fast user switching, logoff). The agent in the other session
    then takes it over within one `push_interval_sec`. Windows releases the handle when a
    process ends, so a crash or logoff never leaves the account locked. Two sessions of
-   one account therefore never write the same queue, cursor or log.
+   one account therefore never write the same queue or log.
    - Recording happens only in the console session. An RDP session of the same account
      is not recorded. Other accounts are not affected.
 
